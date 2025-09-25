@@ -1,0 +1,196 @@
+
+{
+  "Camera": {
+    "Data": {
+      "LookFrom": {
+        "X": 0,
+        "Y": 0,
+        "Z": 500000000
+      },
+      "LookAt": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "VUp": {
+        "X": 0,
+        "Y": 1,
+        "Z": 0
+      },
+      "FOVHeight": 125000000,
+      "FOVWidth": 125000000
+    },
+    "Type": "OrthographicCamera"
+  },
+  "Entity": [
+    {
+      "Material": {
+        "Data": {
+          "Color": {
+            "X": 1,
+            "Y": 0,
+            "Z": 0
+          }
+        },
+        "Type": "Light"
+      },
+      "Shape": {
+        "Data": {
+          "Origin": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Direction": {
+            "X": 1,
+            "Y": 0,
+            "Z": 0
+          },
+          "Radius": 250000,
+          "Height": 50000000000
+        },
+        "Type": "Cylinder"
+      }
+    },
+    {
+      "Material": {
+        "Data": {
+          "Color": {
+            "X": 0,
+            "Y": 1,
+            "Z": 0
+          }
+        },
+        "Type": "Light"
+      },
+      "Shape": {
+        "Data": {
+          "Origin": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Direction": {
+            "X": 0,
+            "Y": 1,
+            "Z": 0
+          },
+          "Radius": 250000,
+          "Height": 50000000000
+        },
+        "Type": "Cylinder"
+      }
+    },
+    {
+      "Material": {
+        "Data": {
+          "Color": {
+            "X": 0,
+            "Y": 0,
+            "Z": 1
+          }
+        },
+        "Type": "Light"
+      },
+      "Shape": {
+        "Data": {
+          "Origin": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Direction": {
+            "X": 0,
+            "Y": 0,
+            "Z": 1
+          },
+          "Radius": 250000,
+          "Height": 50000000000
+        },
+        "Type": "Cylinder"
+      }
+    },
+    {
+      "Material": {
+        "Data": {
+          "Color": {
+            "X": 0.1,
+            "Y": 0.1,
+            "Z": 0.1
+          }
+        },
+        "Type": "Light"
+      },
+      "Shape": {
+        "Data": {
+          "Center": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Radius": 1000000000
+        },
+        "Type": "Sphere"
+      }
+    },
+    {
+      "Material": {
+        "Data": {},
+        "Type": "NormalShader"
+      },
+      "Shape": {
+        "Data": {
+          "Center": {
+            "X": -60000000,
+            "Y": 60000000,
+            "Z": 50000000
+          },
+          "Radius": 40000000
+        },
+        "Type": "Sphere"
+      }
+    },
+    {
+      "Material": {
+        "Data": {},
+        "Type": "NormalShader"
+      },
+      "Shape": {
+        "Data": {
+          "Center": {
+            "X": 60000000,
+            "Y": 60000000,
+            "Z": 50000000
+          },
+          "Radius": 40000000
+        },
+        "Type": "Sphere"
+      }
+    },
+    {
+      "Material": {
+        "Data": {},
+        "Type": "NormalShader"
+      },
+      "Shape": {
+        "Data": {
+          "Center": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Radius": 10000000
+        },
+        "Type": "Sphere"
+      }
+    }
+  ],
+  "Render": {
+    "Seed": 0,
+    "RaysPerPixel": 4,
+    "MaxRayDepth": 10,
+    "Dx": 256,
+    "Dy": 256
+  }
+}
+

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>rad</title>
+    <style>
+    </style>
+  </head>
+  <body>
+    <h1>rad</h1>
+
+    <form action="/render">
+      <label for="scenes">Choose a scene:</label>
+      <select name="scene" id="scene">
+        {{range .Scenes}}
+        <option value="{{.Name}}">{{.Name}}</option>
+        {{end}}
+      </select>
+      <br><br>
+      <input type="submit" value="Render">
+    </form>
+  </body>
+</html>

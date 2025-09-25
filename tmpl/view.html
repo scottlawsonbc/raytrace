@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>rad renders</title>
+    <style>
+        /* Draw border around image. */
+        img {
+            border: 1px solid rgb(212, 19, 19);
+        }
+    </style>
+</head>
+
+<body>
+    <h1>rad render view</h1>
+    <div><a href="/">Back to main page</a></div>
+    <br>
+    <div id="jobOutput"></div>
+    <!-- <img id="renderimg"> -->
+    <script>
+        let source = new EventSource("/update");
+        source.onmessage = function (event) {
+            console.log(event);
+            let renderimg = document.getElementById("renderimg")
+            // let data = event.data
+            // Split data by tab.
+            // let split = data.split("\t")
+            // let jobName = split[0]
+            // let imgData = split[1]
+
+            // Create label for job name.
+            // let jobLabel = document.createElement("label")
+            // jobLabel.innerHTML = jobName
+            // Put label in jobOutput div.
+            let jobOutput = document.getElementById("jobOutput")
+            // jobOutput.appendChild(jobLabel)
+            // Create image element.
+            let img = document.createElement("img")
+            img.src = "data:image/png;base64," + event.data
+            // img.id = jobName
+            // Put image in "jobOutput" div.
+            jobOutput.appendChild(img)
+
+            // renderimg.src = "data:image/png;base64," + imgData
+        };
+    </script>
+</body>
+
+</html>

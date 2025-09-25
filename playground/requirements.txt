@@ -1,0 +1,1989 @@
+I'm working on a custom physics based ray tracer called "raytrace". I've included complete source code below. I want you to help me implement a raytracer playground page so that I can see the raytracer output and edit the scene JSON in a webpage, kind loosely inspired by the Three.js editor or shadertoy. My requirements are described below, followed by the source code.
+
+Requirements:
+
+- The playground should have a split view with the raytracer output on the left and a JSON text editor on the right.
+- The JSON editor should have syntax highlighting and should be able to parse and stringify the scene JSON.
+- The raytracer output should update in real-time as the JSON is edited, making a new render request every time the JSON is changed and the user stops typing for 500ms.
+
+
+The playground page is served on localhost:8020/raytrace/playground.
+The playground has a split view with the raytracer output on the left and a JSON text editor on the right.
+The JSON editor has syntax highlighting and can parse and stringify the scene JSON.
+The page is implemented as a simple HTML file using Go HTML templating and a bit of JavaScript, with a minimal CSS style defined in the same HTML file.
+The template path is code/raytrace/playground/playground.html.
+
+The playground page has a display component for the raytracer output and a JSON editor component for the scene JSON, and will eventually have an inspector page where mouseover events can be inspected and rays can be in
+A render request is made every time the JSON is changed and the user stops typing for 500ms, and what is happening is clear to the user.
+
+The playground page calls the backend server every second at GET /raytrace/status to get a simple ok heartbeat.
+If the playground cannot reach the status page, a red disconnected icon is shown in the top right corner of the page and a message is logged to the console. The page will attempt to reconnect every 1 second.
+
+Types of errors are expected and must be handled:
+1. connection to backend server is lost; show the red disconnected icon and a message in the console
+2. the scene JSON is invalid; show an alert at the top of the page with the error message and log the error to the console
+3. the raytracer crashes; show an alert at the top of the page with the error message and log the error to the console
+4. the raytracer takes too long to render; show an alert at the top of the page with the error message and log the error to the console
+
+When the playground page sends the scene JSON to POST /raytrace/render with the JSON as the body, the backend server will respond with a JSON object containing the rendered image as a base64 encoded PNG. The playground page will display the image in the raytracer output component.
+
+The Go HTTP server logs every request made and the response status code to the console, as well as the request duration in milliseconds.
+The playground backend server lives in code/raytrace/playground/main.go and imports the phys library from code/raytrace/phys.
+
+Please generate the following files according to these requirements:
+1. code/raytrace/playground/playground.html
+2. code/raytrace/playground/main.go
+
+The complete source code of my current version of raytrace is provided for context below:
+
+# C:\Users\scott\github\slam\code\raytrace\phys\camera.go
+package phys
+
+import (
+	"fmt"
+)
+
+// Caster defines an interface for objects that can emit rays.
+// Given normalized screen coordinates (s, t), where 0 ≤ s, t ≤ 1.
+type Caster interface {
+	Cast(s, t float64, rand *Rand) ray
+}
+
+// OrthographicCamera represents an orthographic camera model where rays are parallel
+// and orthogonal to the image plane.
+type OrthographicCamera struct {
+	LookFrom  Point3   // Camera position in world space.
+	LookAt    Point3   // Point in world space the camera is looking at.
+	VUp       Vec3     // Camera relative up vector.
+	FOVHeight Distance // Field of view height in world units.
+	FOVWidth  Distance // Field of view width in world units.
+}
+
+// Cast generates a parallel ray from a point on the image plane at (s, t).
+// s and t are normalized coordinates across the image plane.
+func (cam OrthographicCamera) Cast(s, t float64, rand *Rand) ray {
+	if s < 0 || s > 1 || t < 0 || t > 1 {
+		panic(fmt.Sprintf("Cast invalid sample coords (s, t) (%f, %f)", s, t))
+	}
+	// Compute the camera's orthonormal basis vectors
+	w := cam.LookFrom.Sub(cam.LookAt).Unit() // Camera direction vector (pointing backwards)
+	u := cam.VUp.Cross(w).Unit()             // Camera right vector
+	v := w.Cross(u)                          // Camera up vector
+
+	// Compute the origin point on the image plane corresponding to (s, t)
+	origin := cam.LookFrom.
+		Add(u.Muls(float64(cam.FOVWidth) * (s - 0.5))). // Offset along the right vector.
+		Add(v.Muls(float64(cam.FOVHeight) * (t - 0.5))) // Offset along the up vector.
+
+	// The direction is constant for all rays in an orthographic projection
+	direction := cam.LookAt.Sub(cam.LookFrom).Unit() // Direction from camera to lookat point.
+
+	return ray{
+		origin:      origin,
+		direction:   direction,
+		depth:       0,
+		radiantFlux: Vec3{1, 1, 1},
+		rand:        rand,
+	}
+}
+
+// PinholeCamera represents a basic perspective camera model.
+type PinholeCamera struct {
+	LowerLeftCorner Point3 // Lower-left corner of the image plane in world space.
+	Origin          Point3 // Camera's origin point in world space.
+	Horizontal      Vec3   // Horizontal span of the image plane in world space.
+	Vertical        Vec3   // Vertical span of the image plane in world space.
+}
+
+// Cast generates a ray from the camera origin through the image plane at (s, t).
+func (c PinholeCamera) Cast(s, t float64, rand *Rand) ray {
+	if s < 0 || s > 1 || t < 0 || t > 1 {
+		panic(fmt.Sprintf("Cast invalid sample coords (s, t) (%f, %f)", s, t))
+	}
+	// Compute the point on the image plane corresponding to (s, t)
+	imagePoint := c.LowerLeftCorner.
+		Add(c.Horizontal.Muls(s)).
+		Add(c.Vertical.Muls(t))
+
+	// Compute the direction from the camera origin to the image point.
+	direction := imagePoint.Sub(c.Origin).Unit()
+	return ray{
+		origin:      c.Origin,
+		direction:   direction,
+		depth:       0,
+		radiantFlux: Vec3{1, 1, 1},
+		rand:        rand,
+	}
+}
+
+// DepthOfFieldCamera represents a camera with adjustable position and orientation,
+// including depth of field effects via aperture and focus distance.
+type DepthOfFieldCamera struct {
+	LookFrom        Point3   // Camera position in world space.
+	LookAt          Point3   // Point in world space the camera is looking at.
+	VUp             Vec3     // Up vector defining the camera's orientation.
+	FOVHeight       Distance // Field of view height at the focal distance.
+	FOVWidth        Distance // Field of view width at the focal distance.
+	Aperture        Distance // Aperture size controlling depth of field.
+	WorkingDistance Distance // Distance from the camera to the focal plane.
+}
+
+// Cast generates a ray from the camera through the image plane at (s, t),
+// incorporating depth of field by simulating a thin lens.
+func (cam DepthOfFieldCamera) Cast(s, t float64, rand *Rand) ray {
+	if s < 0 || s > 1 || t < 0 || t > 1 {
+		panic(fmt.Sprintf("Cast invalid sample coords (s, t) (%f, %f)", s, t))
+	}
+	// Compute the camera's orthonormal basis vectors.
+	w := cam.LookFrom.Sub(cam.LookAt).Unit() // Camera direction vector (pointing backwards)
+	u := cam.VUp.Cross(w).Unit()             // Camera right vector
+	v := w.Cross(u)                          // Camera up vector
+
+	// Calculate the size of the image plane at the focal distance
+	horizontal := u.Muls(float64(cam.FOVWidth * cam.WorkingDistance)) // Horizontal span
+	vertical := v.Muls(float64(cam.FOVHeight * cam.WorkingDistance))  // Vertical span
+
+	// Compute the lower-left corner of the image plane.
+	lowerLeftCorner := cam.LookFrom.
+		Subv(horizontal.Divs(2)).
+		Subv(vertical.Divs(2)).
+		Subv(w.Muls(float64(cam.WorkingDistance)))
+
+	// Simulate depth of field by sampling a random point on the lens aperture.
+	lensRadius := cam.Aperture / 2
+	rd := rand.InUnitDisk().Muls(float64(lensRadius)) // Random point in unit disk scaled by lens radius.
+	offset := u.Muls(rd.X).Add(v.Muls(rd.Y))          // Offset from the lens center.
+
+	// Compute the ray's origin and direction.
+	origin := cam.LookFrom.Add(offset) // Ray origin with lens offset.
+	imagePoint := lowerLeftCorner.
+		Add(horizontal.Muls(s)).
+		Add(vertical.Muls(t))
+	direction := imagePoint.Sub(origin).Unit() // Direction from origin to image point.
+
+	return ray{
+		origin:      origin,
+		direction:   direction,
+		depth:       0,             // Depth 0 for primary rays.
+		radiantFlux: Vec3{1, 1, 1}, // TODO: scott revist this in the future when doing spectral rendering.
+		rand:        rand,
+	}
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\distance.go
+package phys
+
+import "fmt"
+
+// Distance represents a physical distance in float64 nanometers.
+// Distance is used to represent world units in the raytracer.
+type Distance float64
+
+const (
+	Nanometer  Distance = 1
+	Micrometer          = 1000 * Nanometer
+	Millimeter          = 1000 * Micrometer
+	Meter               = 1000 * Millimeter
+	NM                  = Nanometer
+	UM                  = Micrometer
+	MM                  = Millimeter
+	M                   = Meter
+)
+
+func (d Distance) Nanometers() float64 {
+	return float64(d)
+}
+
+func (d Distance) Micrometers() float64 {
+	return float64(d) / float64(Micrometer)
+}
+
+func (d Distance) Millimeters() float64 {
+	return float64(d) / float64(Millimeter)
+}
+
+func (d Distance) Meters() float64 {
+	return float64(d) / float64(Meter)
+}
+
+func (d Distance) String() string {
+	if d < Micrometer {
+		return fmt.Sprintf("%f nm", d.Nanometers())
+	}
+	if d < Millimeter {
+		return fmt.Sprintf("%f µm", d.Micrometers())
+	}
+	if d < Meter {
+		return fmt.Sprintf("%f mm", d.Millimeters())
+	}
+	return fmt.Sprintf("%f m", d.Meters())
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\export.go
+package phys
+
+import (
+	"image"
+	"image/color/palette"
+	"image/draw"
+	"image/gif"
+	"image/png"
+	"os"
+)
+
+func Save(path string, img image.Image) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	err = (&png.Encoder{CompressionLevel: png.NoCompression}).Encode(f, img)
+	f.Close()
+	return err
+}
+
+func NewGIF(imgs []image.Image) *gif.GIF {
+	palettedImages := []*image.Paletted{}
+	delays := []int{}
+	for _, img := range imgs {
+		pImg := image.NewPaletted(img.Bounds(), palette.Plan9)
+		draw.Draw(pImg, pImg.Rect, img, img.Bounds().Min, draw.Over)
+		palettedImages = append(palettedImages, pImg)
+		delays = append(delays, 0)
+	}
+	return &gif.GIF{
+		Image: palettedImages,
+		Delay: delays,
+	}
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\material.go
+package phys
+
+import (
+	"fmt"
+	"math"
+)
+
+type collision struct {
+	incoming ray      // Ray that collided with the shape.
+	t        Distance // Distance along the incoming ray to the collision point.
+	at       Point3   // Collision point.
+	normal   Vec3     // Normal vector of the surface at the collision point.
+}
+
+type resolution struct {
+	outgoing []ray
+	color    Vec3
+}
+
+type Material interface {
+	Resolve(c collision) resolution
+}
+
+type Light struct {
+	Color Vec3
+}
+
+func (m Light) Resolve(c collision) resolution {
+	return resolution{color: m.Color.Mul(c.incoming.radiantFlux)}
+}
+
+// NormalShader draws the normal vector of the surface as a color.
+type NormalShader struct{}
+
+func (m NormalShader) Resolve(c collision) resolution {
+	return resolution{color: c.normal.Unit().Mul(c.incoming.radiantFlux)}
+}
+
+type Lambertian struct {
+	Albedo Vec3
+}
+
+func (m Lambertian) Resolve(c collision) resolution {
+	p := c.at
+	target := p.Add(c.normal).Add(c.incoming.rand.UnitVector())
+	newRay := ray{
+		origin:      p,
+		direction:   target.Sub(p).Unit(),
+		depth:       c.incoming.depth + 1,
+		radiantFlux: c.incoming.radiantFlux.Mul(m.Albedo),
+		rand:        c.incoming.rand,
+	}
+	return resolution{outgoing: []ray{newRay}}
+}
+
+type Metal struct {
+	Albedo Vec3
+	Fuzz   float64
+}
+
+func (m Metal) Resolve(c collision) resolution {
+	// TODO: scott should this actually return a resolution with multiple rays?
+	reflected := reflect(c.incoming.direction.Unit(), c.normal)
+	scatteredDirection := reflected.Add(c.incoming.rand.InUnitSphere().Muls(m.Fuzz))
+	if scatteredDirection.Dot(c.normal) > 0 {
+		newRay := ray{
+			origin:      c.at,
+			direction:   scatteredDirection.Unit(),
+			depth:       c.incoming.depth + 1,
+			radiantFlux: c.incoming.radiantFlux.Mul(m.Albedo),
+			rand:        c.incoming.rand,
+		}
+		return resolution{outgoing: []ray{newRay}}
+	}
+	// Absorb the ray (no outgoing rays).
+	// TODO: scott should this ever be reached?
+	fmt.Println("absorbing ray")
+	return resolution{color: Vec3{}}
+}
+
+type Dielectric struct {
+	// TODO: scott should this hold both the exterior and interior refraction indices?
+	RefractionIndex float64
+}
+
+func (m Dielectric) Resolve(c collision) resolution {
+	var outwardNormal Vec3
+	var niOverNt float64
+	var cosine float64
+	var rays []ray
+	rand := c.incoming.rand
+
+	if c.incoming.direction.Dot(c.normal) > 0 {
+		outwardNormal = c.normal.Muls(-1)
+		niOverNt = m.RefractionIndex
+		cosine = m.RefractionIndex * c.incoming.direction.Dot(c.normal) / c.incoming.direction.Length()
+	} else {
+		outwardNormal = c.normal
+		niOverNt = 1.0 / m.RefractionIndex // TODO: SCOTT THIS DOESN"T MAKE SENSE. HARD CODED REFRACTION INDEX ASSUMPTION.
+		cosine = -c.incoming.direction.Dot(c.normal) / c.incoming.direction.Length()
+	}
+
+	refracted, ok := refract(c.incoming.direction, outwardNormal, niOverNt)
+	reflectProb := 1.0
+	if ok {
+		reflectProb = schlick(cosine, m.RefractionIndex)
+		transmitted := ray{
+			origin:      c.at,
+			direction:   refracted.Unit(),
+			depth:       c.incoming.depth + 1,
+			radiantFlux: c.incoming.radiantFlux.Muls((1 - reflectProb)),
+			rand:        rand,
+		}
+		rays = append(rays, transmitted)
+	}
+
+	reflected := reflect(c.incoming.direction, c.normal)
+	reflectedRay := ray{
+		origin:      c.at,
+		direction:   reflected.Unit(),
+		depth:       c.incoming.depth + 1,
+		radiantFlux: c.incoming.radiantFlux.Muls(reflectProb),
+		rand:        rand,
+	}
+	rays = append(rays, reflectedRay)
+	return resolution{outgoing: rays}
+}
+
+func reflect(v, n Vec3) Vec3 {
+	return v.Sub(n.Muls(v.Dot(n) * 2))
+}
+
+// refract returns the refraction vector and a boolean indicating whether
+// refraction is possible.
+func refract(v, n Vec3, niOverNt float64) (refracted Vec3, ok bool) {
+	uv := v.Unit()
+	dt := uv.Dot(n)
+	discriminant := 1 - niOverNt*niOverNt*(1-dt*dt)
+	if discriminant > 0 {
+		return uv.Sub(n.Muls(dt)).Muls(niOverNt).Sub(n.Muls(math.Sqrt(discriminant))), true
+	}
+	return Vec3{}, false
+}
+
+func schlick(cosine, refractionIndex float64) float64 {
+	r0 := (1 - refractionIndex) / (1 + refractionIndex)
+	r0 = r0 * r0
+	return r0 + (1-r0)*math.Pow(1-cosine, 5)
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\math.go
+package phys
+
+import (
+	"fmt"
+	"math"
+)
+
+type Vec3 struct {
+	X float64
+	Y float64
+	Z float64
+}
+
+func (v Vec3) Add(v2 Vec3) Vec3 {
+	return Vec3{v.X + v2.X, v.Y + v2.Y, v.Z + v2.Z}
+}
+
+func (v Vec3) Sub(v2 Vec3) Vec3 {
+	return Vec3{v.X - v2.X, v.Y - v2.Y, v.Z - v2.Z}
+}
+
+func (v Vec3) Mul(v2 Vec3) Vec3 {
+	return Vec3{v.X * v2.X, v.Y * v2.Y, v.Z * v2.Z}
+}
+
+func (v Vec3) Div(v2 Vec3) Vec3 {
+	return Vec3{v.X / v2.X, v.Y / v2.Y, v.Z / v2.Z}
+}
+
+func (v Vec3) Muls(s float64) Vec3 {
+	return Vec3{v.X * s, v.Y * s, v.Z * s}
+}
+
+func (v Vec3) Divs(s float64) Vec3 {
+	return Vec3{v.X / s, v.Y / s, v.Z / s}
+}
+
+func (v Vec3) Dot(v2 Vec3) float64 {
+	return v.X*v2.X + v.Y*v2.Y + v.Z*v2.Z
+}
+
+func (v Vec3) Cross(v2 Vec3) Vec3 {
+	return Vec3{v.Y*v2.Z - v.Z*v2.Y, v.Z*v2.X - v.X*v2.Z, v.X*v2.Y - v.Y*v2.X}
+}
+
+func (v Vec3) Length() float64 {
+	return math.Sqrt(v.Dot(v))
+}
+
+func (v Vec3) Unit() Vec3 {
+	return v.Divs(v.Length())
+}
+
+func (v Vec3) Clip(min, max float64) Vec3 {
+	return Vec3{math.Min(math.Max(v.X, min), max), math.Min(math.Max(v.Y, min), max), math.Min(math.Max(v.Z, min), max)}
+}
+
+func (v Vec3) Set(i int) float64 {
+	switch i {
+	case 0:
+		return v.X
+	case 1:
+		return v.Y
+	case 2:
+		return v.Z
+	}
+	panic("invalid index")
+}
+
+func (v Vec3) Get(i int) float64 {
+	switch i {
+	case 0:
+		return v.X
+	case 1:
+		return v.Y
+	case 2:
+		return v.Z
+	}
+	panic("invalid index")
+}
+
+type Point3 struct {
+	X float64
+	Y float64
+	Z float64
+}
+
+func (p Point3) Set(i int, v float64) Point3 {
+	switch i {
+	case 0:
+		return Point3{v, p.Y, p.Z}
+	case 1:
+		return Point3{p.X, v, p.Z}
+	case 2:
+		return Point3{p.X, p.Y, v}
+	}
+	panic("invalid index")
+}
+
+func (p Point3) Get(i int) float64 {
+	switch i {
+	case 0:
+		return p.X
+	case 1:
+		return p.Y
+	case 2:
+		return p.Z
+	}
+	panic(fmt.Sprintf("invalid index `%d` for Point3", i))
+}
+
+// Sub subtracts a point from a point, returning a vector.
+func (p Point3) Sub(p2 Point3) Vec3 {
+	return Vec3{p.X - p2.X, p.Y - p2.Y, p.Z - p2.Z}
+}
+
+// Add adds a vector to a point, returning a new point.
+func (p Point3) Add(v Vec3) Point3 {
+	return Point3{p.X + v.X, p.Y + v.Y, p.Z + v.Z}
+}
+
+// Subv subtracts a vector from a point, returning a new point.
+func (p Point3) Subv(v Vec3) Point3 {
+	return Point3{p.X - v.X, p.Y - v.Y, p.Z - v.Z}
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\obj.go
+package phys
+
+import (
+	"bufio"
+	"log"
+	"os"
+	"strconv"
+	"strings"
+)
+
+func parseIndex(value string, length int) int {
+	parsed, _ := strconv.ParseInt(value, 0, 0)
+	n := int(parsed)
+	if n < 0 {
+		n += length
+	}
+	return n
+}
+
+func parseFloats(items []string) []float64 {
+	result := make([]float64, len(items))
+	for i, item := range items {
+		f, err := strconv.ParseFloat(item, 64)
+		if err != nil {
+			panic("invalid float: " + item)
+		}
+		result[i] = f
+	}
+	return result
+}
+
+// LoadOBJ loads a .obj file and returns a Shape with automatic BHV.
+func LoadOBJ(path string) Shape {
+	log.Printf("loading .obj: %s\n", path)
+	file, err := os.Open(path)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	vs := make([]Point3, 1, 1024) // 1-based indexing
+	var shapes []Shape
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		keyword := fields[0]
+		args := fields[1:]
+		switch keyword {
+		case "v":
+			f := parseFloats(args)
+			v := Point3{f[0], f[1], f[2]}
+			vs = append(vs, v)
+		case "f":
+			fvs := make([]int, len(args))
+			for i, arg := range args {
+				vertex := strings.Split(arg+"//", "/")
+				fvs[i] = parseIndex(vertex[0], len(vs))
+			}
+			for i := 1; i < len(fvs)-1; i++ {
+				i1, i2, i3 := 0, i, i+1
+				v1, v2, v3 := vs[fvs[i1]], vs[fvs[i2]], vs[fvs[i3]]
+				shapes = append(shapes, triangle{v1, v2, v3})
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		panic(err)
+	}
+	log.Println("loaded", len(shapes), "triangles")
+	b := NewBVH(shapes, 0)
+	return b
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\random.go
+package phys
+
+import (
+	"math"
+	"math/rand"
+)
+
+// Rand wraps a rand.Rand instance to provide additional random generators
+// useful for physically based rendering.
+type Rand struct {
+	*rand.Rand
+}
+
+// NewRand creates a new Random instance with a given seed.
+// This allows for reproducible random number sequences.
+func NewRand(seed int64) *Rand {
+	return &Rand{rand.New(rand.NewSource(seed))}
+}
+
+// InUnitSphere returns a random vector inside a unit sphere centered at the origin.
+// It uses the rejection sampling method to ensure uniform distribution.
+func (r *Rand) InUnitSphere() Vec3 {
+	for {
+		// Generate a random point in the cube [-1,1] x [-1,1] x [-1,1].
+		p := Vec3{
+			r.Float64(),
+			r.Float64(),
+			r.Float64(),
+		}.Muls(2).Sub(Vec3{1, 1, 1})
+		// If the point is inside the unit sphere, return it.
+		if p.Length() < 1.0 {
+			return p
+		}
+	}
+}
+
+// UnitVector returns a random unit vector uniformly distributed over the unit sphere.
+// It uses spherical coordinates for uniform sampling.
+func (r *Rand) UnitVector() Vec3 {
+	// Random azimuthal angle between 0 and 2π.
+	azimuth := r.Float64() * 2 * math.Pi
+	// Random elevation angle (cosine of polar angle) between -1 and 1.
+	z := r.Float64()*2 - 1
+	// Radius at given z (since it's a unit sphere).
+	radius := math.Sqrt(1 - z*z)
+
+	return Vec3{
+		radius * math.Cos(azimuth),
+		radius * math.Sin(azimuth),
+		z,
+	}
+}
+
+// InUnitDisk returns a random vector inside a unit disk (circle) in the XY-plane centered at the origin.
+// It uses the rejection sampling method to ensure uniform distribution.
+func (r *Rand) InUnitDisk() Vec3 {
+	for {
+		// Generate a random point in the square [-1,1] x [-1,1] at z=0.
+		p := Vec3{
+			r.Float64(),
+			r.Float64(),
+			0,
+		}.Muls(2).Sub(Vec3{1, 1, 0})
+
+		if p.Dot(p) < 1.0 {
+			return p
+		}
+	}
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\render.go
+package phys
+
+import (
+	"fmt"
+	"image"
+	"image/color"
+	"log"
+	"math"
+	"sync"
+	"time"
+)
+
+type ray struct {
+	origin      Point3
+	direction   Vec3
+	depth       int
+	radiantFlux Vec3
+	rand        *Rand
+}
+
+func (r ray) at(t Distance) Point3 {
+	p := r.origin.Add(r.direction.Muls(float64(t)))
+	return p
+}
+
+func trace(s *Scene, r ray) Vec3 {
+	if r.depth > s.Render.MaxRayDepth {
+		fmt.Println("killed ray")
+		return Vec3{}
+	}
+	closest := Distance(math.MaxFloat64)
+	var closestCollision collision
+	var closestEntity *Entity
+	for i := range s.Entity {
+		e := &s.Entity[i]
+		hit, c := e.Shape.Collide(r, 0.0001, math.MaxFloat64)
+		if hit && c.t < closest {
+			closest = c.t
+			closestEntity = e
+			closestCollision = c
+		}
+	}
+	if closestEntity == nil {
+		panic(fmt.Sprintf("ray missed all entities: %+v (is the scene missing a skybox entity?)", r))
+	}
+	resolution := closestEntity.Material.Resolve(closestCollision)
+	// Traced ray is the sum of the color from the resolution and the color
+	// from all of the outgoing rays.
+	rgb := resolution.color
+	for _, newRay := range resolution.outgoing {
+		rgb = rgb.Add(trace(s, newRay))
+	}
+	return rgb
+}
+
+type buf struct {
+
+}
+func Render(scene *Scene) image.Image {
+	t0 := time.Now()
+	dx := scene.Render.Dx
+	dy := scene.Render.Dy
+	if dx <= 0 {
+		panic(fmt.Sprintf("Render Dx must be greater than 0, got %d", dx))
+	}
+	if dy <= 0 {
+		panic(fmt.Sprintf("Render Dy must be greater than 0, got %d", dy))
+	}
+	img := image.NewRGBA(image.Rect(0, 0, dy, dx))
+	imgy := 0 // Image y coordinate.
+	wg := sync.WaitGroup{}
+	for y := dy - 1; y >= 0; y-- {
+		wg.Add(1)
+		go func(y int, imgy int) {
+			// This worker runs on a single image row.
+			// The random source is shared for all pixels in the row since
+			// we don't want to share random sources with other workers.
+			// Every worker gets a different seed to prevent correlated random
+			// artifacts in the image.
+			defer wg.Done()
+			rand := NewRand(scene.Render.Seed + int64(y))
+			for x := 0; x < dx; x++ {
+				rgb := Vec3{}
+				for sample := 0; sample < scene.Render.RaysPerPixel; sample++ {
+					var s float64 // Normalized device coordinates (screen coords) between 0 and 1.
+					var t float64 // Normalized device coordinates (screen coords) between 0 and 1.
+					if scene.Render.RaysPerPixel == 1 {
+						// Sample center of the pixel.
+						s = (float64(x) + 0.5) / float64(dx)
+						t = (float64(y) + 0.5) / float64(dy)
+					} else {
+						// Sample randomly within the pixel.
+						s = (float64(x) + rand.Float64()) / float64(dx)
+						t = (float64(y) + rand.Float64()) / float64(dy)
+					}
+					ray := scene.Camera.Cast(s, t, rand)
+					rgb = rgb.Add(trace(scene, ray))
+				}
+				rgb = rgb.Divs(float64(scene.Render.RaysPerPixel))
+				rgb = Vec3{math.Sqrt(rgb.X), math.Sqrt(rgb.Y), math.Sqrt(rgb.Z)} // Gamma 2 correction.
+				img.Set(x, imgy, color.RGBA{uint8(255.99 * rgb.X), uint8(255.99 * rgb.Y), uint8(255.99 * rgb.Z), 255})
+			}
+		}(y, imgy)
+		imgy++
+	}
+	wg.Wait()
+	dt := time.Since(t0)
+	log.Printf("rendered %dx%d image in %s %s/px\n", dx, dy, dt, dt/time.Duration(dx*dy))
+	return img
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\scene_test.go
+package phys
+
+import "testing"
+
+func TestScene_ExampleJSON(t *testing.T) {
+	var scene = Scene{
+		Camera: OrthographicCamera{
+			LookFrom:  Point3{X: 100 + float64(float64(pcbn)*-3*float64(phys.MM)), Y: 300 + float64(float64(pcbn)*-2*float64(phys.MM)), Z: float64(500 * MM)},
+			LookAt:    Point3{X: 0, Y: 0, Z: 0},
+			VUp:       Vec3{X: 0, Y: 1, Z: 0},
+			FOVHeight: 125 * MM,
+			FOVWidth:  125 * MM,
+		},
+		Entity: []Entity{
+			{
+				Shape: Cylinder{
+					Origin:    Point3{X: 0, Y: 0, Z: 0},
+					Direction: Vec3{X: 1, Y: 0, Z: 0},
+					Radius:    0.25 * MM,
+					Height:    50 * M,
+				},
+				Material: Light{Color: Vec3{X: 1, Y: 0, Z: 0}},
+			},
+			{
+				Shape: Cylinder{
+					Origin:    Point3{X: 0, Y: 0, Z: 0},
+					Direction: Vec3{X: 0, Y: 1, Z: 0},
+					Radius:    0.25 * MM,
+					Height:    50 * M,
+				},
+				Material: Light{Color: Vec3{X: 0, Y: 1, Z: 0}},
+			},
+			{
+				Shape: Cylinder{
+					Origin:    Point3{X: 0, Y: 0, Z: 0},
+					Direction: Vec3{X: 0, Y: 0, Z: 1},
+					Radius:    0.25 * MM,
+					Height:    50 * M,
+				},
+				Material: Light{Color: Vec3{X: 0, Y: 0, Z: 1}},
+			},
+			{
+				Shape:    Sphere{Center: Point3{X: 0, Y: 0, Z: 0}, Radius: 1 * M},
+				Material: Light{Color: Vec3{X: 0.1, Y: 0.1, Z: 0.1}},
+			},
+			{
+				Shape:    Sphere{Center: Point3{X: float64(-60 * MM), Y: float64(60 * MM), Z: float64(50 * MM)}, Radius: 40 * MM},
+				Material: NormalShader{},
+			},
+			{
+				Shape:    Sphere{Center: Point3{X: float64(60 * MM), Y: float64(60 * MM), Z: float64(50 * MM)}, Radius: 40 * MM},
+				Material: NormalShader{},
+			},
+			{
+				Shape:    Sphere{Center: Point3{X: 0, Y: 0, Z: 0}, Radius: 10 * MM},
+				Material: NormalShader{},
+			},
+		},
+		Render: RenderOptions{
+			Seed:         0,
+			RaysPerPixel: 4,
+			MaxRayDepth:     10,
+			Dx:           512,
+			Dy:           512,
+		},
+	}
+
+	sceneToJSON
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\scene.go
+package phys
+
+import "encoding/json"
+
+type Entity struct {
+	Shape    Shape
+	Material Material
+}
+
+type RenderOptions struct {
+	Seed         int64 // Random base seed.
+	RaysPerPixel int   // Number of rays to generate for each pixel.
+	MaxRayDepth     int   // Maximum number of collisions before terminating ray.
+	Dx           int   // Width of the rendered image in pixels.
+	Dy           int   // Height of the rendered image in pixels.
+}
+
+type Scene struct {
+	Camera Caster
+	Entity []Entity
+	Render RenderOptions
+}
+
+func (s *Scene) Add(e ...Entity) {
+	s.Entity = append(s.Entity, e...)
+}
+
+func (s *Scene) JSON() string {
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
+func NewSceneFromJSON(data string) (Scene, error) {
+	var s Scene
+	err := json.Unmarshal([]byte(data), &s)
+	return s, err
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\shape_test.go
+package phys
+
+import (
+	"math"
+	"testing"
+)
+
+// epsilon defines the tolerance for floating-point comparisons.
+const epsilon = 1e-6
+
+// floatEquals checks if two float64 values are approximately equal within epsilon.
+func floatEquals(a, b float64) bool {
+	return math.Abs(a-b) < epsilon
+}
+
+// vec3Equals checks if two Vec3 vectors are approximately equal component-wise.
+func vec3Equals(a, b Vec3) bool {
+	return floatEquals(a.X, b.X) && floatEquals(a.Y, b.Y) && floatEquals(a.Z, b.Z)
+}
+
+// point3Equals checks if two Point3 points are approximately equal component-wise.
+func point3Equals(a, b Point3) bool {
+	return floatEquals(a.X, b.X) && floatEquals(a.Y, b.Y) && floatEquals(a.Z, b.Z)
+}
+
+func TestAABBIntersects(t *testing.T) {
+	testcases := []struct {
+		box1, box2 aabb
+		intersect  bool
+	}{
+		{
+			box1:      aabb{Min: Point3{0, 0, 0}, Max: Point3{1, 1, 1}},
+			box2:      aabb{Min: Point3{0, 0, 0}, Max: Point3{1, 1, 1}},
+			intersect: true,
+		},
+		{
+			box1:      aabb{Min: Point3{0, 0, 0}, Max: Point3{1, 1, 1}},
+			box2:      aabb{Min: Point3{-2, -2, -2}, Max: Point3{-1, -1, -1}},
+			intersect: false,
+		},
+	}
+	for _, tc := range testcases {
+		if got := tc.box1.intersects(tc.box2); got != tc.intersect {
+			t.Errorf("got %v, want %v", got, tc.intersect)
+		}
+	}
+}
+
+func TestCylinderCollide(t *testing.T) {
+	// Define a standard cylinder for testing.
+	cylinder := Cylinder{
+		Origin:    Point3{X: 0, Y: 0, Z: 0},
+		Direction: Vec3{X: 0, Y: 1, Z: 0}, // Y-axis
+		Radius:    1.0,
+		Height:    2.0,
+	}
+
+	// Define a set of test cases.
+	testCases := []struct {
+		name          string
+		ray           ray
+		expectedHit   bool
+		expectedPoint Point3
+		expectedNorm  Vec3
+	}{
+		{
+			name: "Ray intersects cylindrical surface",
+			ray: ray{
+				origin:    Point3{X: 2, Y: 1, Z: 0},
+				direction: Vec3{X: -1, Y: 0, Z: 0}.Unit(),
+			},
+			expectedHit:   true,
+			expectedPoint: Point3{X: 1, Y: 1, Z: 0},
+			expectedNorm:  Vec3{X: 1, Y: 0, Z: 0},
+		},
+		{
+			name: "Ray misses the cylinder",
+			ray: ray{
+				origin:    Point3{X: 2, Y: 3, Z: 0},
+				direction: Vec3{X: 1, Y: 0, Z: 0}.Unit(),
+			},
+			expectedHit: false,
+		},
+		{
+			name: "Ray intersects top cap",
+			ray: ray{
+				origin:    Point3{X: 0, Y: 3, Z: 0},
+				direction: Vec3{X: 0, Y: -1, Z: 0}.Unit(),
+			},
+			expectedHit:   true,
+			expectedPoint: Point3{X: 0, Y: 2, Z: 0},
+			expectedNorm:  Vec3{X: 0, Y: 1, Z: 0},
+		},
+		{
+			name: "Ray intersects bottom cap",
+			ray: ray{
+				origin:    Point3{X: 0, Y: -1, Z: 0},
+				direction: Vec3{X: 0, Y: 1, Z: 0}.Unit(),
+			},
+			expectedHit:   true,
+			expectedPoint: Point3{X: 0, Y: 0, Z: 0},
+			expectedNorm:  Vec3{X: 0, Y: -1, Z: 0},
+		},
+		{
+			name: "Ray parallel to cylinder axis and outside",
+			ray: ray{
+				origin:    Point3{X: 2, Y: 0, Z: 0},
+				direction: Vec3{X: 0, Y: 1, Z: 0}.Unit(),
+			},
+			expectedHit: false,
+		},
+		{
+			name: "Ray parallel to cylinder axis and inside",
+			ray: ray{
+				origin:    Point3{X: 0.5, Y: -1, Z: 0},
+				direction: Vec3{X: 0, Y: 1, Z: 0}.Unit(),
+			},
+			expectedHit:   true,
+			expectedPoint: Point3{X: 0.5, Y: 0, Z: 0},
+			expectedNorm:  Vec3{X: 0, Y: -1, Z: 0},
+		},
+		{
+			name: "Ray tangent to cylinder",
+			ray: ray{
+				origin:    Point3{X: 1, Y: 1, Z: -1},
+				direction: Vec3{X: 0, Y: 0, Z: 1}.Unit(),
+			},
+			expectedHit:   true,
+			expectedPoint: Point3{X: 1, Y: 1, Z: 0},
+			expectedNorm:  Vec3{X: 1, Y: 0, Z: 0},
+		},
+		{
+			name: "Ray intersects cylindrical surface and caps",
+			ray: ray{
+				origin:    Point3{X: 0, Y: 3, Z: -1},
+				direction: Vec3{X: 0, Y: -1, Z: 1}.Unit(),
+			},
+			expectedHit: true,
+			// Expected to hit the top cap first
+			expectedPoint: Point3{X: 0, Y: 2, Z: 0},
+			expectedNorm:  Vec3{X: 0, Y: 1, Z: 0},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			hit, collision := cylinder.Collide(tc.ray, 0.0001, math.MaxFloat64)
+			if hit != tc.expectedHit {
+				t.Errorf("Expected hit: %v, got: %v", tc.expectedHit, hit)
+			}
+			if hit {
+				// Check intersection point
+				if !point3Equals(collision.at, tc.expectedPoint) {
+					t.Errorf("Expected intersection point: %v, got: %v", tc.expectedPoint, collision.at)
+				}
+				// Check normal
+				if !vec3Equals(collision.normal, tc.expectedNorm) {
+					t.Errorf("Expected normal: %v, got: %v", tc.expectedNorm, collision.normal)
+				}
+			}
+		})
+	}
+}
+
+func TestCylinderBounds(t *testing.T) {
+	// Define test cases for Bounds
+	testCases := []struct {
+		name        string
+		cylinder    Cylinder
+		expectedMin Point3
+		expectedMax Point3
+	}{
+		{
+			name: "Standard cylinder aligned with Y-axis",
+			cylinder: Cylinder{
+				Origin:    Point3{X: 0, Y: 0, Z: 0},
+				Direction: Vec3{X: 0, Y: 1, Z: 0},
+				Radius:    1.0,
+				Height:    2.0,
+			},
+			expectedMin: Point3{X: -1, Y: 0, Z: -1},
+			expectedMax: Point3{X: 1, Y: 2, Z: 1},
+		},
+		{
+			name: "Cylinder offset from origin",
+			cylinder: Cylinder{
+				Origin:    Point3{X: 2, Y: 3, Z: 4},
+				Direction: Vec3{X: 0, Y: 1, Z: 0},
+				Radius:    0.5,
+				Height:    1.5,
+			},
+			expectedMin: Point3{X: 1.5, Y: 3, Z: 3.5},
+			expectedMax: Point3{X: 2.5, Y: 4.5, Z: 4.5},
+		},
+		{
+			name: "Cylinder aligned with Z-axis",
+			cylinder: Cylinder{
+				Origin:    Point3{X: -1, Y: -1, Z: -1},
+				Direction: Vec3{X: 0, Y: 0, Z: 1},
+				Radius:    2.0,
+				Height:    3.0,
+			},
+			expectedMin: Point3{X: -3, Y: -3, Z: -1},
+			expectedMax: Point3{X: 1, Y: 1, Z: 2},
+		},
+		{
+			name: "Cylinder with non-unit axis vector",
+			cylinder: Cylinder{
+				Origin:    Point3{X: 0, Y: 0, Z: 0},
+				Direction: Vec3{X: 0, Y: 2, Z: 0}, // Not unit vector
+				Radius:    1.0,
+				Height:    2.0,
+			},
+			expectedMin: Point3{X: -1, Y: 0, Z: -1},
+			expectedMax: Point3{X: 1, Y: 2, Z: 1},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			bounds := tc.cylinder.Bounds()
+			if !point3Equals(bounds.Min, tc.expectedMin) {
+				t.Errorf("Expected Min: %v, got: %v", tc.expectedMin, bounds.Min)
+			}
+			if !point3Equals(bounds.Max, tc.expectedMax) {
+				t.Errorf("Expected Max: %v, got: %v", tc.expectedMax, bounds.Max)
+			}
+		})
+	}
+}
+# C:\Users\scott\github\slam\code\raytrace\phys\shape.go
+package phys
+
+import (
+	"math"
+	"sort"
+)
+
+// Shape represents an geometric object that can collide with rays.
+type Shape interface {
+	Collide(r ray, tmin Distance, tmax Distance) (bool, collision)
+	Bounds() aabb
+}
+
+// aabb represents an axis-aligned bounding box.
+type aabb struct {
+	Min Point3
+	Max Point3
+}
+
+func (b aabb) center() Point3 {
+	return Point3(Vec3(b.Min.Add(Vec3(b.Max))).Divs(2))
+}
+
+func (b aabb) intersects(other aabb) bool {
+	return b.Min.X <= other.Max.X && b.Max.X >= other.Min.X &&
+		b.Min.Y <= other.Max.Y && b.Max.Y >= other.Min.Y &&
+		b.Min.Z <= other.Max.Z && b.Max.Z >= other.Min.Z
+}
+
+func (b aabb) union(other aabb) aabb {
+	return aabb{
+		Min: Point3{
+			math.Min(b.Min.X, other.Min.X),
+			math.Min(b.Min.Y, other.Min.Y),
+			math.Min(b.Min.Z, other.Min.Z),
+		},
+		Max: Point3{
+			math.Max(b.Max.X, other.Max.X),
+			math.Max(b.Max.Y, other.Max.Y),
+			math.Max(b.Max.Z, other.Max.Z),
+		},
+	}
+}
+
+func (b aabb) hit(r ray, tmin, tmax Distance) bool {
+	for axis := 0; axis < 3; axis++ {
+		invD := 1.0 / r.direction.Get(axis)
+		t0 := (b.Min.Get(axis) - r.origin.Get(axis)) * invD
+		t1 := (b.Max.Get(axis) - r.origin.Get(axis)) * invD
+		if invD < 0.0 {
+			t0, t1 = t1, t0
+		}
+		tmin = Distance(math.Max(float64(t0), float64(tmin)))
+		tmax = Distance(math.Min(float64(t1), float64(tmax)))
+		if tmax <= tmin {
+			return false
+		}
+	}
+	return true
+}
+
+type Sphere struct {
+	Center Point3
+	Radius Distance
+}
+
+func (s Sphere) Collide(r ray, tmin, tmax Distance) (bool, collision) {
+	oc := r.origin.Sub(s.Center)
+	a := r.direction.Dot(r.direction)
+	b := oc.Dot(r.direction)
+	c := oc.Dot(oc) - float64(s.Radius*s.Radius)
+	discriminant := b*b - a*c
+	if discriminant < 0 {
+		return false, collision{}
+	}
+	sqrtD := math.Sqrt(discriminant)
+	t := (-b - sqrtD) / a
+	if t < float64(tmin) || t > float64(tmax) {
+		t = (-b + sqrtD) / a
+		if t < float64(tmin) || t > float64(tmax) {
+			return false, collision{}
+		}
+	}
+	at := r.at(Distance(t))
+	return true, collision{r, Distance(t), at, at.Sub(s.Center).Divs(float64(s.Radius))}
+}
+
+func (s Sphere) Bounds() aabb {
+	radius := float64(s.Radius)
+	return aabb{
+		Min: s.Center.Add(Vec3{-radius, -radius, -radius}),
+		Max: s.Center.Add(Vec3{radius, radius, radius})}
+}
+
+type triangle struct {
+	p0 Point3
+	p1 Point3
+	p2 Point3
+}
+
+func (tri triangle) Collide(r ray, tmin, tmax Distance) (bool, collision) {
+	edge1 := tri.p1.Sub(tri.p0)
+	edge2 := tri.p2.Sub(tri.p0)
+	h := r.direction.Cross(edge2)
+	a := edge1.Dot(h)
+	if a > -1e-8 && a < 1e-8 {
+		return false, collision{}
+	}
+	f := 1 / a
+	s := r.origin.Sub(tri.p0)
+	u := f * s.Dot(h)
+	if u < 0 || u > 1 {
+		return false, collision{}
+	}
+	q := s.Cross(edge1)
+	v := f * r.direction.Dot(q)
+	if v < 0 || u+v > 1 {
+		return false, collision{}
+	}
+	t := f * edge2.Dot(q)
+	if t < float64(tmin) || t > float64(tmax) {
+		return false, collision{}
+	}
+	at := r.at(Distance(t))
+	return true, collision{r, Distance(t), at, edge1.Cross(edge2).Unit()}
+}
+
+func (tri triangle) Bounds() aabb {
+	min := Point3{
+		math.Min(math.Min(tri.p0.X, tri.p1.X), tri.p2.X),
+		math.Min(math.Min(tri.p0.Y, tri.p1.Y), tri.p2.Y),
+		math.Min(math.Min(tri.p0.Z, tri.p1.Z), tri.p2.Z),
+	}
+	max := Point3{
+		math.Max(math.Max(tri.p0.X, tri.p1.X), tri.p2.X),
+		math.Max(math.Max(tri.p0.Y, tri.p1.Y), tri.p2.Y),
+		math.Max(math.Max(tri.p0.Z, tri.p1.Z), tri.p2.Z),
+	}
+	return aabb{min, max}
+}
+
+type group struct {
+	shapes []Shape
+}
+
+func (g group) Collide(r ray, tmin, tmax Distance) (bool, collision) {
+	var hit bool
+	var c collision
+	for _, s := range g.shapes {
+		h, col := s.Collide(r, tmin, tmax)
+		if h && (!hit || col.t < c.t) {
+			hit = true
+			c = col
+		}
+	}
+	return hit, c
+}
+
+func (g group) Bounds() aabb {
+	var b aabb
+	for _, s := range g.shapes {
+		b = b.union(s.Bounds())
+	}
+	return b
+}
+
+type bvh struct {
+	left   Shape
+	right  Shape
+	bounds aabb
+}
+
+func (b *bvh) Bounds() aabb {
+	return b.bounds
+}
+
+func (b *bvh) Collide(r ray, tmin, tmax Distance) (bool, collision) {
+	if !b.Bounds().hit(r, tmin, tmax) {
+		return false, collision{}
+	}
+	hl, cl := b.left.Collide(r, tmin, tmax)
+	hr, cr := b.right.Collide(r, tmin, tmax)
+	if !hl && !hr {
+		return false, collision{}
+	}
+	if !hl {
+		return true, cr
+	}
+	if !hr {
+		return true, cl
+	}
+	if cl.t < cr.t {
+		return true, cl
+	}
+	return true, cr
+}
+
+func NewBVH(shapes []Shape, depth int) *bvh {
+	b := &bvh{}
+	if len(shapes) == 1 {
+		b.left = shapes[0]
+		b.right = shapes[0]
+		return b
+	}
+	xmin := math.Inf(1)
+	xmax := math.Inf(-1)
+	ymin := math.Inf(1)
+	ymax := math.Inf(-1)
+	zmin := math.Inf(1)
+	zmax := math.Inf(-1)
+	for i := range shapes {
+		xmin = math.Min(xmin, shapes[i].Bounds().Min.X)
+		xmax = math.Max(xmax, shapes[i].Bounds().Max.X)
+		ymin = math.Min(ymin, shapes[i].Bounds().Min.Y)
+		ymax = math.Max(ymax, shapes[i].Bounds().Max.Y)
+		zmin = math.Min(zmin, shapes[i].Bounds().Min.Z)
+		zmax = math.Max(zmax, shapes[i].Bounds().Max.Z)
+	}
+	b.bounds = aabb{Point3{xmin, ymin, zmin}, Point3{xmax, ymax, zmax}}
+	mid := len(shapes) / 2
+	if len(shapes) <= 64 {
+		b.left = group{shapes[:mid]}
+		leftBounds := aabb{}
+		zmin := math.Inf(1)
+		zmax := math.Inf(-1)
+		leftShapes := shapes[:mid]
+		for i := range leftShapes {
+			leftBounds = leftBounds.union(leftShapes[i].Bounds())
+			zmin = math.Min(zmin, leftShapes[i].Bounds().Min.Z)
+			zmax = math.Max(zmax, leftShapes[i].Bounds().Max.Z)
+		}
+		rightShapes := shapes[mid:]
+		b.right = group{rightShapes}
+		rightBounds := aabb{}
+		zmin = math.Inf(1)
+		zmax = math.Inf(-1)
+		for i := range rightShapes {
+			rightBounds = rightBounds.union(rightShapes[i].Bounds())
+			zmin = math.Min(zmin, rightShapes[i].Bounds().Min.Z)
+			zmax = math.Max(zmax, rightShapes[i].Bounds().Max.Z)
+		}
+		b.bounds = leftBounds.union(rightBounds)
+		return b
+	}
+
+	var axis int
+	dx := xmax - xmin
+	dy := ymax - ymin
+	dz := zmax - zmin
+	if dx > dy && dx > dz {
+		axis = 0
+	} else if dy > dz {
+		axis = 1
+	} else {
+		axis = 2
+	}
+	// Sort the shapes along the best axis.
+	sort.Slice(shapes, func(i, j int) bool {
+		bi := shapes[i].Bounds()
+		bj := shapes[j].Bounds()
+		switch axis {
+		case 0:
+			return bi.Min.X < bj.Min.X
+		case 1:
+			return bi.Min.Y < bj.Min.Y
+		case 2:
+			return bi.Min.Z < bj.Min.Z
+		}
+		return false
+	})
+
+	left := NewBVH(shapes[:mid], depth+1)
+	right := NewBVH(shapes[mid:], depth+1)
+	b.left = left
+	b.right = right
+	return b
+}
+
+// TODO: cylinder is bugged!
+// Cylinder represents a finite cylinder with a base center, axis, radius, and height.
+type Cylinder struct {
+	Origin    Point3   // Center of the cylinder's base in world units.
+	Direction Vec3     // Axis direction (does not need to be a unit vector).
+	Radius    Distance // Radius of the cylinder in world units.
+	Height    Distance // Height of the cylinder in world units.
+}
+
+// Collide determines if the ray intersects with the finite cylinder.
+// It returns a boolean indicating a hit and the collision details.
+func (c Cylinder) Collide(r ray, tmin, tmax Distance) (bool, collision) {
+	d := c.Direction.Unit() // Ensure the axis is a unit vector.
+	oc := r.origin.Sub(c.Origin)
+
+	dDotRd := d.Dot(r.direction)
+	dDotOc := d.Dot(oc)
+
+	// Components perpendicular to the cylinder axis.
+	rdPerp := r.direction.Sub(d.Muls(dDotRd))
+	ocPerp := oc.Sub(d.Muls(dDotOc))
+
+	a := rdPerp.Dot(rdPerp)
+	b := 2.0 * rdPerp.Dot(ocPerp)
+	cVal := ocPerp.Dot(ocPerp) - float64(c.Radius*c.Radius)
+
+	var closestT float64 = math.MaxFloat64
+	var closestCollision collision
+	hit := false
+
+	// Check for intersections with the cylindrical surface.
+	if a > 1e-8 { // Avoid division by zero for parallel rays.
+		discriminant := b*b - 4*a*cVal
+		if discriminant >= 0 {
+			sqrtD := math.Sqrt(discriminant)
+			t1 := (-b - sqrtD) / (2.0 * a)
+			t2 := (-b + sqrtD) / (2.0 * a)
+
+			for _, t := range []float64{t1, t2} {
+				if t < float64(tmin) || t > float64(tmax) {
+					continue
+				}
+				// Compute the y coordinate along the axis.
+				y := dDotOc + t*dDotRd
+				if y >= 0 && y <= float64(c.Height) {
+					if t < closestT {
+						at := r.at(Distance(t))
+						normal := at.Sub(c.Origin.Add(d.Muls(y))).Unit()
+						closestT = t
+						closestCollision = collision{
+							incoming: r,
+							t:        Distance(t),
+							at:       at,
+							normal:   normal,
+						}
+						hit = true
+					}
+				}
+			}
+		}
+	}
+
+	// Define the top and bottom caps.
+	caps := []struct {
+		center Point3
+		normal Vec3
+	}{
+		{
+			center: c.Origin,
+			normal: d.Muls(-1), // Bottom cap normal.
+		},
+		{
+			center: c.Origin.Add(d.Muls(float64(c.Height))),
+			normal: d, // Top cap normal.
+		},
+	}
+
+	// Check for intersections with the caps.
+	for _, cap := range caps {
+		denom := cap.normal.Dot(r.direction)
+		if math.Abs(denom) < 1e-6 {
+			// Ray is parallel to the cap.
+			continue
+		}
+		t := cap.normal.Dot(cap.center.Sub(r.origin)) / denom
+		if t < float64(tmin) || t > float64(tmax) {
+			continue
+		}
+		// Compute the intersection point.
+		p := r.at(Distance(t))
+		// Check if the point is within the cap's radius.
+		if p.Sub(cap.center).Dot(p.Sub(cap.center)) <= float64(c.Radius*c.Radius) {
+			if t < closestT {
+				closestT = t
+				closestCollision = collision{
+					incoming: r,
+					t:        Distance(t),
+					at:       p,
+					normal:   cap.normal,
+				}
+				hit = true
+			}
+		}
+	}
+
+	return hit, closestCollision
+}
+
+// Bounds returns the axis-aligned bounding box of the finite cylinder.
+func (c Cylinder) Bounds() aabb {
+	d := c.Direction.Unit()
+	// Compute orthogonal vectors to the axis for bounding.
+	var orthogonal Vec3
+	if math.Abs(d.X) > math.Abs(d.Y) {
+		orthogonal = Vec3{-d.Z, 0, d.X}.Unit()
+	} else {
+		orthogonal = Vec3{0, d.Z, -d.Y}.Unit()
+	}
+	// Perpendicular vectors in the plane orthogonal to the axis.
+	u := orthogonal
+	v := d.Cross(u)
+
+	// Compute the extreme points.
+	points := []Point3{}
+	for i := 0; i <= 1; i++ { // Bottom and top
+		base := c.Origin.Add(d.Muls(float64(i) * float64(c.Height)))
+		for theta := 0.0; theta < 2*math.Pi; theta += math.Pi / 2 { // Four points around the circumference.
+			circPoint := base.Add(u.Muls(float64(c.Radius) * math.Cos(theta))).Add(v.Muls(float64(c.Radius) * math.Sin(theta)))
+			points = append(points, circPoint)
+		}
+	}
+
+	// Initialize min and max with the first point.
+	min := points[0]
+	max := points[0]
+	for _, p := range points[1:] {
+		min.X = math.Min(min.X, p.X)
+		min.Y = math.Min(min.Y, p.Y)
+		min.Z = math.Min(min.Z, p.Z)
+		max.X = math.Max(max.X, p.X)
+		max.Y = math.Max(max.Y, p.Y)
+		max.Z = math.Max(max.Z, p.Z)
+	}
+
+	return aabb{Min: min, Max: max}
+}
+# C:\Users\scott\github\slam\code\raytrace\scene\gem\main.go
+package main
+
+import (
+	"fmt"
+	"image"
+	"image/gif"
+	"os"
+	"time"
+
+	"github.com/scottlawsonbc/slam/code/photon/raytrace/phys"
+)
+
+func check(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
+func optimizePAL(old []phys.Entity) (new []phys.Entity) {
+	on := []phys.Entity{}
+	offShapes := []phys.Shape{}
+	for n, e := range old {
+		if m, ok := e.Material.(phys.Light); ok {
+			if m.Color == (phys.Vec3{X: 0, Y: 0, Z: 0}) {
+				offShapes = append(offShapes, e.Shape)
+			} else {
+				on = append(on, old[n])
+			}
+		}
+	}
+	offEntity := phys.Entity{
+		Shape:    phys.NewBVH(offShapes, 2),
+		Material: phys.Light{Color: phys.Vec3{X: 0, Y: 0, Z: 0}},
+	}
+	new = append(on, offEntity)
+	return
+}
+
+func importPAL(posz float64) (leds []phys.Entity) {
+	for _, led := range LEDS {
+		leds = append(leds, phys.Entity{
+			Shape: phys.Sphere{
+				Center: phys.Point3{
+					X: led.POSX * float64(phys.MM),
+					Y: led.POSY * float64(phys.MM),
+					Z: posz,
+				},
+				Radius: phys.MM * 1,
+			},
+
+			Material: phys.Light{Color: phys.Vec3{X: .2, Y: 0, Z: 0}},
+		})
+	}
+	return
+}
+
+func main() {
+	colormap3 := map[int]phys.Vec3{
+		1: {X: 228 / 255.0, Y: 26 / 255.0, Z: 28 / 255.0},
+		2: {X: 55 / 255.0, Y: 126 / 255.0, Z: 184 / 255.0},
+		3: {X: 77 / 255.0, Y: 175 / 255.0, Z: 74 / 255.0},
+		4: {X: 152 / 255.0, Y: 78 / 255.0, Z: 163 / 255.0},
+		5: {X: 255 / 255.0, Y: 127 / 255.0, Z: 0 / 255.0},
+		6: {X: 255 / 255.0, Y: 255 / 255.0, Z: 51 / 255.0},
+		7: {X: 166 / 255.0, Y: 86 / 255.0, Z: 40 / 255.0},
+		8: {X: 247 / 255.0, Y: 129 / 255.0, Z: 191 / 255.0},
+	}
+	leds := importPAL(0)
+	frames := []image.Image{}
+	for pcbn := 1; pcbn <= 257; pcbn += 1 {
+		fmt.Println("Rendering PCBN", pcbn)
+		for bitn, led := range LEDS {
+			if led.PCBN == pcbn {
+				leds[bitn].Material = phys.Light{
+					Color: colormap3[led.RING],
+				}
+			} else {
+			}
+		}
+		var scene = phys.Scene{
+			Camera: phys.OrthographicCamera{
+				LookFrom:  phys.Point3{X: 100 + float64(float64(pcbn)*-3*float64(phys.MM)), Y: 300 + float64(float64(pcbn)*-2*float64(phys.MM)), Z: float64(500 * phys.MM)},
+				LookAt:    phys.Point3{X: 0, Y: 0, Z: 0},
+				VUp:       phys.Vec3{X: 0, Y: 1, Z: 0},
+				FOVHeight: 125 * phys.MM,
+				FOVWidth:  125 * phys.MM,
+			},
+			Entity: []phys.Entity{
+				{
+					Shape: phys.Cylinder{
+						Origin:    phys.Point3{X: 0, Y: 0, Z: 0},
+						Direction: phys.Vec3{X: 1, Y: 0, Z: 0},
+						Radius:    0.25 * phys.MM,
+						Height:    50 * phys.M,
+					},
+					Material: phys.Light{Color: phys.Vec3{X: 1, Y: 0, Z: 0}},
+				},
+				{
+					Shape: phys.Cylinder{
+						Origin:    phys.Point3{X: 0, Y: 0, Z: 0},
+						Direction: phys.Vec3{X: 0, Y: 1, Z: 0},
+						Radius:    0.25 * phys.MM,
+						Height:    50 * phys.M,
+					},
+					Material: phys.Light{Color: phys.Vec3{X: 0, Y: 1, Z: 0}},
+				},
+				{
+					Shape: phys.Cylinder{
+						Origin:    phys.Point3{X: 0, Y: 0, Z: 0},
+						Direction: phys.Vec3{X: 0, Y: 0, Z: 1},
+						Radius:    0.25 * phys.MM,
+						Height:    50 * phys.M,
+					},
+					Material: phys.Light{Color: phys.Vec3{X: 0, Y: 0, Z: 1}},
+				},
+				{
+					Shape:    phys.Sphere{Center: phys.Point3{X: 0, Y: 0, Z: 0}, Radius: 1 * phys.M},
+					Material: phys.Light{Color: phys.Vec3{X: 0.1, Y: 0.1, Z: 0.1}},
+				},
+				{
+					Shape:    phys.Sphere{Center: phys.Point3{X: float64(-60 * phys.MM), Y: float64(60 * phys.MM), Z: float64(50 * phys.MM)}, Radius: 40 * phys.MM},
+					Material: phys.NormalShader{},
+				},
+				{
+					Shape:    phys.Sphere{Center: phys.Point3{X: float64(60 * phys.MM), Y: float64(60 * phys.MM), Z: float64(50 * phys.MM)}, Radius: 40 * phys.MM},
+					Material: phys.NormalShader{},
+				},
+				{
+					Shape:    phys.Sphere{Center: phys.Point3{X: 0, Y: 0, Z: 0}, Radius: 10 * phys.MM},
+					Material: phys.NormalShader{},
+				},
+			},
+			Render: phys.RenderOptions{
+				Seed:         0,
+				RaysPerPixel: 4,
+				MaxRayDepth:     10,
+				Dx:           512,
+				Dy:           512,
+			},
+		}
+		scene.Add(optimizePAL(leds)...)
+		img := phys.Render(&scene)
+		frames = append(frames, img)
+		fmt.Printf("scene json: %+v\n", scene.JSON())
+		if pcbn > 0 {
+			break
+		}
+	}
+	g := phys.NewGIF(frames)
+	path := time.Now().Format("./out/out_20060102_150405.gif")
+	f, err := os.Create(path)
+	check(err)
+	err = gif.EncodeAll(f, g)
+	check(err)
+	f.Close()
+	fmt.Println("Saved to", path)
+}
+
+# C:\Users\scott\github\slam\code\raytrace\scene\gem\led.go
+package main
+
+type LED struct {
+	POSX float64 // X distance from center (mm).
+	POSY float64 // Y distance from center (mm).
+	PCBN int     // Designator index as printed on PCB (1-based). Ex: D1 --> 1.
+	BITN int     // Bit shift offset (0-based) to use when sending to driver.
+	RING int     // Ring number. Center ring starts at 1 and then increases out.
+	EMIT bool    // LED on/off status.
+}
+
+// LEDS is a list of all of the LEDs on Scott's LED matrix emitter: PAL257.
+// This is a circular array of LEDs that is usedful for computational imaging.
+// It is used here as a ray tracer prop to test implementation.
+var LEDS = []LED{
+	{POSX: -42.66, POSY: -7.97, PCBN: 205, BITN: 0, RING: 8},
+	{POSX: -43.21, POSY: -4.00, PCBN: 206, BITN: 1, RING: 8},
+	{POSX: -43.40, POSY: 0.00, PCBN: 207, BITN: 2, RING: 8},
+	{POSX: -43.21, POSY: 4.00, PCBN: 208, BITN: 3, RING: 8},
+	{POSX: -42.66, POSY: 7.97, PCBN: 209, BITN: 4, RING: 8},
+	{POSX: 26.15, POSY: 34.63, PCBN: 231, BITN: 5, RING: 8},
+	{POSX: 22.85, POSY: 36.90, PCBN: 230, BITN: 6, RING: 8},
+	{POSX: 4.00, POSY: 43.21, PCBN: 225, BITN: 7, RING: 8},
+	{POSX: 19.35, POSY: 38.85, PCBN: 229, BITN: 8, RING: 8},
+	{POSX: 7.97, POSY: 42.66, PCBN: 226, BITN: 9, RING: 8},
+	{POSX: 15.68, POSY: 40.47, PCBN: 228, BITN: 10, RING: 8},
+	{POSX: 11.88, POSY: 41.74, PCBN: 227, BITN: 11, RING: 8},
+	{POSX: 16.14, POSY: 33.52, PCBN: 166, BITN: 12, RING: 7},
+	{POSX: 8.28, POSY: 36.27, PCBN: 164, BITN: 13, RING: 7},
+	{POSX: 12.29, POSY: 35.11, PCBN: 165, BITN: 14, RING: 7},
+	{POSX: 11.86, POSY: 28.64, PCBN: 113, BITN: 15, RING: 6},
+	{POSX: 8.02, POSY: 29.94, PCBN: 112, BITN: 16, RING: 6},
+	{POSX: 0.00, POSY: 43.40, PCBN: 224, BITN: 17, RING: 8},
+	{POSX: 4.17, POSY: 36.97, PCBN: 163, BITN: 18, RING: 7},
+	{POSX: -4.00, POSY: 43.21, PCBN: 223, BITN: 19, RING: 8},
+	{POSX: 4.05, POSY: 30.73, PCBN: 111, BITN: 20, RING: 6},
+	{POSX: -7.97, POSY: 42.66, PCBN: 222, BITN: 21, RING: 8},
+	{POSX: 0.00, POSY: 37.20, PCBN: 162, BITN: 22, RING: 7},
+	{POSX: -15.68, POSY: 40.47, PCBN: 220, BITN: 23, RING: 8},
+	{POSX: -11.88, POSY: 41.74, PCBN: 221, BITN: 24, RING: 8},
+	{POSX: 0.00, POSY: 24.80, PCBN: 68, BITN: 25, RING: 5},
+	{POSX: 0.00, POSY: 31.00, PCBN: 110, BITN: 26, RING: 6},
+	{POSX: -4.17, POSY: 36.97, PCBN: 161, BITN: 27, RING: 7},
+	{POSX: -8.28, POSY: 36.27, PCBN: 160, BITN: 28, RING: 7},
+	{POSX: -4.05, POSY: 30.73, PCBN: 109, BITN: 29, RING: 6},
+	{POSX: -12.29, POSY: 35.11, PCBN: 159, BITN: 30, RING: 7},
+	{POSX: -11.86, POSY: 28.64, PCBN: 107, BITN: 31, RING: 6},
+	{POSX: -8.02, POSY: 29.94, PCBN: 108, BITN: 32, RING: 6},
+	{POSX: -15.50, POSY: 26.85, PCBN: 106, BITN: 33, RING: 6},
+	{POSX: -16.14, POSY: 33.52, PCBN: 158, BITN: 34, RING: 7},
+	{POSX: -19.35, POSY: 38.85, PCBN: 219, BITN: 35, RING: 8},
+	{POSX: -38.85, POSY: 19.35, PCBN: 212, BITN: 36, RING: 8},
+	{POSX: -18.87, POSY: 24.59, PCBN: 105, BITN: 37, RING: 6},
+	{POSX: -21.92, POSY: 21.92, PCBN: 104, BITN: 38, RING: 6},
+	{POSX: -19.79, POSY: 31.50, PCBN: 157, BITN: 39, RING: 7},
+	{POSX: -22.85, POSY: 36.90, PCBN: 218, BITN: 40, RING: 8},
+	{POSX: -36.90, POSY: 22.85, PCBN: 213, BITN: 41, RING: 8},
+	{POSX: -23.19, POSY: 29.08, PCBN: 156, BITN: 42, RING: 7},
+	{POSX: -29.08, POSY: 23.19, PCBN: 154, BITN: 43, RING: 7},
+	{POSX: -26.15, POSY: 34.63, PCBN: 217, BITN: 44, RING: 8},
+	{POSX: -34.63, POSY: 26.15, PCBN: 214, BITN: 45, RING: 8},
+	{POSX: -26.30, POSY: 26.30, PCBN: 155, BITN: 46, RING: 7},
+	{POSX: -29.24, POSY: 32.07, PCBN: 216, BITN: 47, RING: 8},
+	{POSX: -32.07, POSY: 29.24, PCBN: 215, BITN: 48, RING: 8},
+	{POSX: 19.79, POSY: 31.50, PCBN: 167, BITN: 49, RING: 7},
+	{POSX: 29.24, POSY: 32.07, PCBN: 232, BITN: 50, RING: 8},
+	{POSX: 23.19, POSY: 29.08, PCBN: 168, BITN: 51, RING: 7},
+	{POSX: 32.07, POSY: 29.24, PCBN: 233, BITN: 52, RING: 8},
+	{POSX: 34.63, POSY: 26.15, PCBN: 234, BITN: 53, RING: 8},
+	{POSX: 26.30, POSY: 26.30, PCBN: 169, BITN: 54, RING: 7},
+	{POSX: 36.90, POSY: 22.85, PCBN: 235, BITN: 55, RING: 8},
+	{POSX: 29.08, POSY: 23.19, PCBN: 170, BITN: 56, RING: 7},
+	{POSX: 38.85, POSY: 19.35, PCBN: 236, BITN: 57, RING: 8},
+	{POSX: 42.66, POSY: 7.97, PCBN: 239, BITN: 58, RING: 8},
+	{POSX: 40.47, POSY: 15.68, PCBN: 237, BITN: 59, RING: 8},
+	{POSX: 41.74, POSY: 11.88, PCBN: 238, BITN: 60, RING: 8},
+	{POSX: 31.50, POSY: 19.79, PCBN: 171, BITN: 61, RING: 7},
+	{POSX: 33.52, POSY: 16.14, PCBN: 172, BITN: 62, RING: 7},
+	{POSX: 35.11, POSY: 12.29, PCBN: 173, BITN: 63, RING: 7},
+	{POSX: 28.64, POSY: 11.86, PCBN: 119, BITN: 64, RING: 6},
+	{POSX: 26.85, POSY: 15.50, PCBN: 118, BITN: 65, RING: 6},
+	{POSX: 15.50, POSY: 26.85, PCBN: 114, BITN: 66, RING: 6},
+	{POSX: 24.59, POSY: 18.87, PCBN: 117, BITN: 67, RING: 6},
+	{POSX: 18.87, POSY: 24.59, PCBN: 115, BITN: 68, RING: 6},
+	{POSX: 21.92, POSY: 21.92, PCBN: 116, BITN: 69, RING: 6},
+	{POSX: 4.31, POSY: 24.42, PCBN: 69, BITN: 70, RING: 5},
+	{POSX: 23.30, POSY: 8.48, PCBN: 75, BITN: 71, RING: 5},
+	{POSX: 8.48, POSY: 23.30, PCBN: 70, BITN: 72, RING: 5},
+	{POSX: 21.48, POSY: 12.40, PCBN: 74, BITN: 73, RING: 5},
+	{POSX: 12.40, POSY: 21.48, PCBN: 71, BITN: 74, RING: 5},
+	{POSX: 19.00, POSY: 15.94, PCBN: 73, BITN: 75, RING: 5},
+	{POSX: 15.94, POSY: 19.00, PCBN: 72, BITN: 76, RING: 5},
+	{POSX: 16.11, POSY: 9.30, PCBN: 42, BITN: 77, RING: 4},
+	{POSX: 9.30, POSY: 16.11, PCBN: 40, BITN: 78, RING: 4},
+	{POSX: 13.15, POSY: 13.15, PCBN: 41, BITN: 79, RING: 4},
+	{POSX: 8.77, POSY: 8.77, PCBN: 20, BITN: 80, RING: 3},
+	{POSX: 4.81, POSY: 17.97, PCBN: 39, BITN: 81, RING: 4},
+	{POSX: -4.31, POSY: 24.42, PCBN: 67, BITN: 82, RING: 5},
+	{POSX: 4.75, POSY: 11.46, PCBN: 19, BITN: 83, RING: 3},
+	{POSX: -8.48, POSY: 23.30, PCBN: 66, BITN: 84, RING: 5},
+	{POSX: 0.00, POSY: 18.60, PCBN: 38, BITN: 85, RING: 4},
+	{POSX: -12.40, POSY: 21.48, PCBN: 65, BITN: 86, RING: 5},
+	{POSX: -15.94, POSY: 19.00, PCBN: 64, BITN: 87, RING: 5},
+	{POSX: 0.00, POSY: 6.20, PCBN: 6, BITN: 88, RING: 2},
+	{POSX: 0.00, POSY: 12.40, PCBN: 18, BITN: 89, RING: 3},
+	{POSX: -4.81, POSY: 17.97, PCBN: 37, BITN: 90, RING: 4},
+	{POSX: -17.97, POSY: 4.81, PCBN: 33, BITN: 91, RING: 4},
+	{POSX: -9.30, POSY: 16.11, PCBN: 36, BITN: 92, RING: 4},
+	{POSX: -16.11, POSY: 9.30, PCBN: 34, BITN: 93, RING: 4},
+	{POSX: -4.75, POSY: 11.46, PCBN: 17, BITN: 94, RING: 3},
+	{POSX: -13.15, POSY: 13.15, PCBN: 35, BITN: 95, RING: 4},
+	{POSX: -8.77, POSY: 8.77, PCBN: 16, BITN: 96, RING: 3},
+	{POSX: -19.00, POSY: 15.94, PCBN: 63, BITN: 97, RING: 5},
+	{POSX: -40.47, POSY: 15.68, PCBN: 211, BITN: 98, RING: 8},
+	{POSX: -41.74, POSY: 11.88, PCBN: 210, BITN: 99, RING: 8},
+	{POSX: -24.59, POSY: 18.87, PCBN: 103, BITN: 100, RING: 6},
+	{POSX: -31.50, POSY: 19.79, PCBN: 153, BITN: 101, RING: 7},
+	{POSX: -36.97, POSY: 4.17, PCBN: 149, BITN: 102, RING: 7},
+	{POSX: -21.48, POSY: 12.40, PCBN: 62, BITN: 103, RING: 5},
+	{POSX: -24.42, POSY: 4.31, PCBN: 60, BITN: 104, RING: 5},
+	{POSX: -33.52, POSY: 16.14, PCBN: 152, BITN: 105, RING: 7},
+	{POSX: -23.30, POSY: 8.48, PCBN: 61, BITN: 106, RING: 5},
+	{POSX: -36.27, POSY: 8.28, PCBN: 150, BITN: 107, RING: 7},
+	{POSX: -26.85, POSY: 15.50, PCBN: 102, BITN: 108, RING: 6},
+	{POSX: -30.73, POSY: 4.05, PCBN: 99, BITN: 109, RING: 6},
+	{POSX: -35.11, POSY: 12.29, PCBN: 151, BITN: 110, RING: 7},
+	{POSX: -28.64, POSY: 11.86, PCBN: 101, BITN: 111, RING: 6},
+	{POSX: -29.94, POSY: 8.02, PCBN: 100, BITN: 112, RING: 6},
+	{POSX: 36.27, POSY: 8.28, PCBN: 174, BITN: 113, RING: 7},
+	{POSX: 43.21, POSY: 4.00, PCBN: 240, BITN: 114, RING: 8},
+	{POSX: 29.94, POSY: 8.02, PCBN: 120, BITN: 115, RING: 6},
+	{POSX: 43.40, POSY: 0.00, PCBN: 241, BITN: 116, RING: 8},
+	{POSX: 36.97, POSY: 4.17, PCBN: 175, BITN: 117, RING: 7},
+	{POSX: 24.42, POSY: 4.31, PCBN: 76, BITN: 118, RING: 5},
+	{POSX: 43.21, POSY: -4.00, PCBN: 242, BITN: 119, RING: 8},
+	{POSX: 30.73, POSY: 4.05, PCBN: 121, BITN: 120, RING: 6},
+	{POSX: 42.66, POSY: -7.97, PCBN: 243, BITN: 121, RING: 8},
+	{POSX: 37.20, POSY: 0.00, PCBN: 176, BITN: 122, RING: 7},
+	{POSX: 41.74, POSY: -11.88, PCBN: 244, BITN: 123, RING: 8},
+	{POSX: 31.00, POSY: 0.00, PCBN: 122, BITN: 124, RING: 6},
+	{POSX: 36.97, POSY: -4.17, PCBN: 177, BITN: 125, RING: 7},
+	{POSX: 36.27, POSY: -8.28, PCBN: 178, BITN: 126, RING: 7},
+	{POSX: 30.73, POSY: -4.05, PCBN: 123, BITN: 127, RING: 6},
+	{POSX: 29.94, POSY: -8.02, PCBN: 124, BITN: 128, RING: 6},
+	{POSX: 24.80, POSY: 0.00, PCBN: 77, BITN: 129, RING: 5},
+	{POSX: 17.97, POSY: 4.81, PCBN: 43, BITN: 130, RING: 4},
+	{POSX: 24.42, POSY: -4.31, PCBN: 78, BITN: 131, RING: 5},
+	{POSX: 4.38, POSY: 4.38, PCBN: 7, BITN: 132, RING: 2},
+	{POSX: 11.46, POSY: 4.75, PCBN: 21, BITN: 133, RING: 3},
+	{POSX: 23.30, POSY: -8.48, PCBN: 79, BITN: 134, RING: 5},
+	{POSX: 18.60, POSY: 0.00, PCBN: 44, BITN: 135, RING: 4},
+	{POSX: 21.48, POSY: -12.40, PCBN: 80, BITN: 136, RING: 5},
+	{POSX: 6.20, POSY: 0.00, PCBN: 8, BITN: 137, RING: 2},
+	{POSX: 12.40, POSY: 0.00, PCBN: 22, BITN: 138, RING: 3},
+	{POSX: 17.97, POSY: -4.81, PCBN: 45, BITN: 139, RING: 4},
+	{POSX: 4.38, POSY: -4.38, PCBN: 9, BITN: 140, RING: 2},
+	{POSX: 16.11, POSY: -9.30, PCBN: 46, BITN: 141, RING: 4},
+	{POSX: 11.46, POSY: -4.75, PCBN: 23, BITN: 142, RING: 3},
+	{POSX: 13.15, POSY: -13.15, PCBN: 47, BITN: 143, RING: 4},
+	{POSX: 8.77, POSY: -8.77, PCBN: 24, BITN: 144, RING: 3},
+	{POSX: -4.38, POSY: 4.38, PCBN: 5, BITN: 145, RING: 2},
+	{POSX: 4.75, POSY: -11.46, PCBN: 25, BITN: 146, RING: 3},
+	{POSX: -11.46, POSY: 4.75, PCBN: 15, BITN: 147, RING: 3},
+	{POSX: 0.00, POSY: 0.00, PCBN: 1, BITN: 148, RING: 1},
+	{POSX: -18.60, POSY: 0.00, PCBN: 32, BITN: 149, RING: 4},
+	{POSX: -6.20, POSY: 0.00, PCBN: 4, BITN: 150, RING: 2},
+	{POSX: 0.00, POSY: -6.20, PCBN: 2, BITN: 151, RING: 2},
+	{POSX: -12.40, POSY: 0.00, PCBN: 14, BITN: 152, RING: 3},
+	{POSX: 0.00, POSY: -12.40, PCBN: 10, BITN: 153, RING: 3},
+	{POSX: -17.97, POSY: -4.81, PCBN: 31, BITN: 154, RING: 4},
+	{POSX: -4.38, POSY: -4.38, PCBN: 3, BITN: 155, RING: 2},
+	{POSX: -16.11, POSY: -9.30, PCBN: 30, BITN: 156, RING: 4},
+	{POSX: -11.46, POSY: -4.75, PCBN: 13, BITN: 157, RING: 3},
+	{POSX: -4.75, POSY: -11.46, PCBN: 11, BITN: 158, RING: 3},
+	{POSX: -13.15, POSY: -13.15, PCBN: 29, BITN: 159, RING: 4},
+	{POSX: -8.77, POSY: -8.77, PCBN: 12, BITN: 160, RING: 3},
+	{POSX: -37.20, POSY: 0.00, PCBN: 148, BITN: 161, RING: 7},
+	{POSX: -40.47, POSY: -15.68, PCBN: 203, BITN: 162, RING: 8},
+	{POSX: -41.74, POSY: -11.88, PCBN: 204, BITN: 163, RING: 8},
+	{POSX: -24.80, POSY: 0.00, PCBN: 59, BITN: 164, RING: 5},
+	{POSX: -31.00, POSY: 0.00, PCBN: 98, BITN: 165, RING: 6},
+	{POSX: -36.97, POSY: -4.17, PCBN: 147, BITN: 166, RING: 7},
+	{POSX: -21.48, POSY: -12.40, PCBN: 56, BITN: 167, RING: 5},
+	{POSX: -24.42, POSY: -4.31, PCBN: 58, BITN: 168, RING: 5},
+	{POSX: -33.52, POSY: -16.14, PCBN: 144, BITN: 169, RING: 7},
+	{POSX: -23.30, POSY: -8.48, PCBN: 57, BITN: 170, RING: 5},
+	{POSX: -36.27, POSY: -8.28, PCBN: 146, BITN: 171, RING: 7},
+	{POSX: -26.85, POSY: -15.50, PCBN: 94, BITN: 172, RING: 6},
+	{POSX: -30.73, POSY: -4.05, PCBN: 97, BITN: 173, RING: 6},
+	{POSX: -35.11, POSY: -12.29, PCBN: 145, BITN: 174, RING: 7},
+	{POSX: -28.64, POSY: -11.86, PCBN: 95, BITN: 175, RING: 6},
+	{POSX: -29.94, POSY: -8.02, PCBN: 96, BITN: 176, RING: 6},
+	{POSX: 35.11, POSY: -12.29, PCBN: 179, BITN: 177, RING: 7},
+	{POSX: 28.64, POSY: -11.86, PCBN: 125, BITN: 178, RING: 6},
+	{POSX: 19.00, POSY: -15.94, PCBN: 81, BITN: 179, RING: 5},
+	{POSX: 40.47, POSY: -15.68, PCBN: 245, BITN: 180, RING: 8},
+	{POSX: 26.85, POSY: -15.50, PCBN: 126, BITN: 181, RING: 6},
+	{POSX: 33.52, POSY: -16.14, PCBN: 180, BITN: 182, RING: 7},
+	{POSX: 38.85, POSY: -19.35, PCBN: 246, BITN: 183, RING: 8},
+	{POSX: 24.59, POSY: -18.87, PCBN: 127, BITN: 184, RING: 6},
+	{POSX: 31.50, POSY: -19.79, PCBN: 181, BITN: 185, RING: 7},
+	{POSX: 36.90, POSY: -22.85, PCBN: 247, BITN: 186, RING: 8},
+	{POSX: 29.08, POSY: -23.19, PCBN: 182, BITN: 187, RING: 7},
+	{POSX: 26.15, POSY: -34.63, PCBN: 251, BITN: 188, RING: 8},
+	{POSX: 34.63, POSY: -26.15, PCBN: 248, BITN: 189, RING: 8},
+	{POSX: 26.30, POSY: -26.30, PCBN: 183, BITN: 190, RING: 7},
+	{POSX: 29.24, POSY: -32.07, PCBN: 250, BITN: 191, RING: 8},
+	{POSX: 32.07, POSY: -29.24, PCBN: 249, BITN: 192, RING: 8},
+	{POSX: 22.85, POSY: -36.90, PCBN: 252, BITN: 193, RING: 8},
+	{POSX: 21.92, POSY: -21.92, PCBN: 128, BITN: 194, RING: 6},
+	{POSX: 9.30, POSY: -16.11, PCBN: 48, BITN: 195, RING: 4},
+	{POSX: 23.19, POSY: -29.08, PCBN: 184, BITN: 196, RING: 7},
+	{POSX: 4.81, POSY: -17.97, PCBN: 49, BITN: 197, RING: 4},
+	{POSX: 19.35, POSY: -38.85, PCBN: 253, BITN: 198, RING: 8},
+	{POSX: 15.94, POSY: -19.00, PCBN: 82, BITN: 199, RING: 5},
+	{POSX: 18.87, POSY: -24.59, PCBN: 129, BITN: 200, RING: 6},
+	{POSX: 19.79, POSY: -31.50, PCBN: 185, BITN: 201, RING: 7},
+	{POSX: 12.40, POSY: -21.48, PCBN: 83, BITN: 202, RING: 5},
+	{POSX: 16.14, POSY: -33.52, PCBN: 186, BITN: 203, RING: 7},
+	{POSX: 8.48, POSY: -23.30, PCBN: 84, BITN: 204, RING: 5},
+	{POSX: 15.50, POSY: -26.85, PCBN: 130, BITN: 205, RING: 6},
+	{POSX: 12.29, POSY: -35.11, PCBN: 187, BITN: 206, RING: 7},
+	{POSX: 11.86, POSY: -28.64, PCBN: 131, BITN: 207, RING: 6},
+	{POSX: 8.02, POSY: -29.94, PCBN: 132, BITN: 208, RING: 6},
+	{POSX: -19.00, POSY: -15.94, PCBN: 55, BITN: 209, RING: 5},
+	{POSX: 4.31, POSY: -24.42, PCBN: 85, BITN: 210, RING: 5},
+	{POSX: 0.00, POSY: -18.60, PCBN: 26, BITN: 211, RING: 4},
+	{POSX: 4.05, POSY: -30.73, PCBN: 133, BITN: 212, RING: 6},
+	{POSX: -9.30, POSY: -16.11, PCBN: 28, BITN: 213, RING: 4},
+	{POSX: -4.81, POSY: -17.97, PCBN: 27, BITN: 214, RING: 4},
+	{POSX: -15.94, POSY: -19.00, PCBN: 54, BITN: 215, RING: 5},
+	{POSX: 0.00, POSY: -24.80, PCBN: 50, BITN: 216, RING: 5},
+	{POSX: -12.40, POSY: -21.48, PCBN: 53, BITN: 217, RING: 5},
+	{POSX: -4.31, POSY: -24.42, PCBN: 51, BITN: 218, RING: 5},
+	{POSX: -16.14, POSY: -33.52, PCBN: 138, BITN: 219, RING: 7},
+	{POSX: -8.48, POSY: -23.30, PCBN: 52, BITN: 220, RING: 5},
+	{POSX: -15.50, POSY: -26.85, PCBN: 90, BITN: 221, RING: 6},
+	{POSX: -4.05, POSY: -30.73, PCBN: 87, BITN: 222, RING: 6},
+	{POSX: -11.86, POSY: -28.64, PCBN: 89, BITN: 223, RING: 6},
+	{POSX: -8.02, POSY: -29.94, PCBN: 88, BITN: 224, RING: 6},
+	{POSX: -38.85, POSY: -19.35, PCBN: 202, BITN: 225, RING: 8},
+	{POSX: -19.35, POSY: -38.85, PCBN: 195, BITN: 226, RING: 8},
+	{POSX: -24.59, POSY: -18.87, PCBN: 93, BITN: 227, RING: 6},
+	{POSX: -18.87, POSY: -24.59, PCBN: 91, BITN: 228, RING: 6},
+	{POSX: -21.92, POSY: -21.92, PCBN: 92, BITN: 229, RING: 6},
+	{POSX: -31.50, POSY: -19.79, PCBN: 143, BITN: 230, RING: 7},
+	{POSX: -19.79, POSY: -31.50, PCBN: 139, BITN: 231, RING: 7},
+	{POSX: -36.90, POSY: -22.85, PCBN: 201, BITN: 232, RING: 8},
+	{POSX: -22.85, POSY: -36.90, PCBN: 196, BITN: 233, RING: 8},
+	{POSX: -29.08, POSY: -23.19, PCBN: 142, BITN: 234, RING: 7},
+	{POSX: -23.19, POSY: -29.08, PCBN: 140, BITN: 235, RING: 7},
+	{POSX: -34.63, POSY: -26.15, PCBN: 200, BITN: 236, RING: 8},
+	{POSX: -26.15, POSY: -34.63, PCBN: 197, BITN: 237, RING: 8},
+	{POSX: -26.30, POSY: -26.30, PCBN: 141, BITN: 238, RING: 7},
+	{POSX: -32.07, POSY: -29.24, PCBN: 199, BITN: 239, RING: 8},
+	{POSX: -29.24, POSY: -32.07, PCBN: 198, BITN: 240, RING: 8},
+	{POSX: -12.29, POSY: -35.11, PCBN: 137, BITN: 241, RING: 7},
+	{POSX: 0.00, POSY: -31.00, PCBN: 86, BITN: 242, RING: 6},
+	{POSX: 15.68, POSY: -40.47, PCBN: 254, BITN: 243, RING: 8},
+	{POSX: -15.68, POSY: -40.47, PCBN: 194, BITN: 244, RING: 8},
+	{POSX: 8.28, POSY: -36.27, PCBN: 188, BITN: 245, RING: 7},
+	{POSX: -8.28, POSY: -36.27, PCBN: 136, BITN: 246, RING: 7},
+	{POSX: 11.88, POSY: -41.74, PCBN: 255, BITN: 247, RING: 8},
+	{POSX: -11.88, POSY: -41.74, PCBN: 193, BITN: 248, RING: 8},
+	{POSX: 4.17, POSY: -36.97, PCBN: 189, BITN: 249, RING: 7},
+	{POSX: -4.17, POSY: -36.97, PCBN: 135, BITN: 250, RING: 7},
+	{POSX: 0.00, POSY: -37.20, PCBN: 134, BITN: 251, RING: 7},
+	{POSX: 7.97, POSY: -42.66, PCBN: 256, BITN: 252, RING: 8},
+	{POSX: -7.97, POSY: -42.66, PCBN: 192, BITN: 253, RING: 8},
+	{POSX: 4.00, POSY: -43.21, PCBN: 257, BITN: 254, RING: 8},
+	{POSX: -4.00, POSY: -43.21, PCBN: 191, BITN: 255, RING: 8},
+	{POSX: 0.00, POSY: -43.40, PCBN: 190, BITN: 256, RING: 8},
+}
+

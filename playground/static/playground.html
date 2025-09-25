@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Raytrace Playground</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css">
+    <style>
+        body,
+        html {
+            height: 100%;
+            margin: 0;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Alert Styles */
+        #alert {
+            display: none;
+            padding: 10px;
+            background-color: #f44336;
+            /* Red */
+            color: white;
+            text-align: center;
+        }
+
+        /* Status Icon */
+        #status-container {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            display: flex;
+            gap: 10px;
+        }
+
+        #status,
+        #animationStatus {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+        }
+
+        /* Control Panel */
+        #control-panel {
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-bottom: 1px solid #ccc;
+            display: flex;
+            gap: 10px;
+        }
+
+        /* Split View */
+        #container {
+            flex: 1;
+            display: flex;
+            height: calc(100% - 60px);
+            /* Adjust based on alert and control panel height */
+        }
+
+        /* Left Pane - Rendered Image */
+        #leftPane {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #333;
+        }
+
+        #renderedImage {
+            max-width: 100%;
+            max-height: 100%;
+        }
+
+        /* Right Pane - JSON Editor */
+        #rightPane {
+            width: 50%;
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid #ccc;
+        }
+
+        /* CodeMirror Editor */
+        .CodeMirror {
+            height: 100%;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Alert Message -->
+    <div id="alert"></div>
+
+    <!-- Status Icons Container -->
+    <div id="status-container">
+        <!-- Backend Status Icon -->
+        <div id="status" title="Backend Status" style="background-color: #4CAF50;"></div>
+        <!-- Animation Status Icon -->
+        <div id="animationStatus" title="Animation Status" style="background-color: #f44336;"></div>
+    </div>
+
+    <!-- Control Panel -->
+    <div id="control-panel">
+        <button id="startBtn" onclick="startAnimation()">Start Animation</button>
+        <button id="stopBtn" onclick="stopAnimation()" disabled>Stop Animation</button>
+        <span style="margin-left: auto; font-size: 14px;">
+            <strong>Hint:</strong> Press <kbd>Spacebar</kbd> to toggle animation
+        </span>
+    </div>
+
+    <!-- Split Container -->
+    <div id="container">
+        <div id="leftPane">
+            <img id="renderedImage" src="" alt="Rendered Image">
+        </div>
+        <div id="rightPane">
+            <textarea id="jsonEditor"></textarea>
+        </div>
+    </div>
+    <script src="/raytrace/playground/static/codemirror.js"></script>
+    <script src="/raytrace/playground/static/javascript.js"></script>
+    <script>
+        // Debounce function to limit the rate of function calls
+        function debounce(func, wait) {
+            let timeout;
+            return function (...args) {
+                clearTimeout(timeout);
+                timeout = setTimeout(() => func.apply(this, args), wait);
+            };
+        }
+
+        let animationInterval = null;
+        let editor; // Declare editor globally
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const animationIndicator = document.getElementById('animationStatus');
+
+        // Function to start the animation
+        function startAnimation() {
+            if (animationInterval) return; // Prevent multiple intervals.
+
+            // Update UI to reflect animation is running
+            animationIndicator.style.backgroundColor = '#4CAF50'; // Green
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+
+            const startTime = Date.now() / 1000; // Current time in seconds
+
+            animationInterval = setInterval(async () => {
+                try {
+                    // Get the current scene from the editor
+                    const sceneJSON = editor.getValue();
+                    const scene = JSON.parse(sceneJSON);
+
+                    // Calculate the rotation parameter 's'
+                    const rotationPeriodSeconds = 15; // Time to complete a full rotation.
+                    const t = Date.now() / 1000; // Current time in seconds.
+                    const s = ((t - startTime) % rotationPeriodSeconds) / rotationPeriodSeconds;
+
+                    // Animate the scene
+                    const animatedScene = animate(scene, s);
+
+                    // Send updated scene to the render endpoint.
+                    const response = await fetch("/raytrace/render", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(animatedScene)
+                    });
+
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        showAlert(`Render Error: ${errorData.error}`);
+                        console.error("Render Error:", errorData.error);
+                        stopAnimation(); // Stop animation on error
+                        return;
+                    }
+
+                    const data = await response.json();
+                    if (data.image) {
+                        document.getElementById("renderedImage").src = `data:image/png;base64,${data.image}`;
+                        hideAlert(); // Hide alert if render is successful
+                    } else if (data.error) {
+                        showAlert(`Render Error: ${data.error}`);
+                        console.error('Render Error:', data.error);
+                        stopAnimation(); // Stop animation on error
+                    } else {
+                        showAlert('Render Error: No image data received.');
+                        console.error('Render Error: No image data received.');
+                        stopAnimation(); // Stop animation on error
+                    }
+                } catch (error) {
+                    showAlert(`Animation Error: ${error.message}`);
+                    console.error("Animation Error:", error);
+                    stopAnimation(); // Stop animation on error
+                }
+            }, 100); // Adjust interval for smoother or faster animation.
+        }
+
+        // Function to stop the animation
+        function stopAnimation() {
+            if (animationInterval) {
+                clearInterval(animationInterval);
+                animationInterval = null;
+
+                // Update UI to reflect animation is stopped
+                animationIndicator.style.backgroundColor = '#f44336'; // Red
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+        }
+
+        // Function to toggle animation (start/stop)
+        function toggleAnimation() {
+            if (animationInterval) {
+                stopAnimation();
+            } else {
+                startAnimation();
+            }
+        }
+
+        // Animate modifies the scene according to parameter s between 0 and 1.
+        // Returns the modified scene.
+        function animate(scene, s) {
+            // Deep clone the scene to avoid mutating the original
+            const nextScene = JSON.parse(JSON.stringify(scene));
+
+            if (!nextScene.Camera || !Array.isArray(nextScene.Camera) || nextScene.Camera.length === 0) {
+                console.error("No camera found in the scene.");
+                return scene; // Return original scene if no camera is found
+            }
+
+            // Use the first camera for animation
+            const camera = nextScene.Camera[0];
+
+            if (!camera.Data || !camera.Data.LookFrom) {
+                console.error("Camera data is missing LookFrom.");
+                return scene;
+            }
+
+            const orbitRadius = Math.sqrt(
+                camera.Data.LookFrom.X * camera.Data.LookFrom.X +
+                camera.Data.LookFrom.Y * camera.Data.LookFrom.Y
+            )
+            const angle = 2 * Math.PI * s;
+
+            // Update the LookFrom position to orbit around the Z axis
+            camera.Data.LookFrom.X = orbitRadius * Math.cos(angle);
+            camera.Data.LookFrom.Y = orbitRadius * Math.sin(angle);
+
+            console.log("Animated Camera Position:", camera.Data.LookFrom.X, camera.Data.LookFrom.Y);
+
+            return nextScene;
+        }
+
+        // Function to show alerts
+        function showAlert(message) {
+            const alertBox = document.getElementById('alert');
+            alertBox.style.display = 'block';
+            alertBox.textContent = message;
+        }
+
+        // Function to hide alerts
+        function hideAlert() {
+            const alertBox = document.getElementById('alert');
+            alertBox.style.display = 'none';
+            alertBox.textContent = '';
+        }
+
+        // Function to update the rendered image
+        async function updateRender() {
+            hideAlert();
+            const sceneJSON = editor.getValue();
+            try {
+                // Validate JSON
+                const scene = JSON.parse(sceneJSON);
+
+                // Send POST /raytrace/render
+                const response = await fetch('/raytrace/render', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: sceneJSON
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    showAlert(`Render Error: ${errorData.error}`);
+                    console.error('Render Error:', errorData.error);
+                    return;
+                }
+
+                const data = await response.json();
+                if (data.image) {
+                    document.getElementById("renderedImage").src = `data:image/png;base64,${data.image}`;
+                    hideAlert(); // Hide alert if render is successful
+                } else if (data.error) {
+                    showAlert(`Render Error: ${data.error}`);
+                    console.error('Render Error:', data.error);
+                } else {
+                    showAlert('Render Error: No image data received.');
+                    console.error('Render Error: No image data received.');
+                }
+            } catch (e) {
+                showAlert(`JSON Error: ${e.message}`);
+                console.error('JSON Error:', e);
+            }
+        }
+
+        // Debounced version of updateRender
+        const debouncedUpdateRender = debounce(updateRender, 500);
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const alertBox = document.getElementById('alert');
+            const statusIcon = document.getElementById('status');
+            const renderedImage = document.getElementById('renderedImage');
+            const jsonEditorTextarea = document.getElementById('jsonEditor');
+
+            // Initialize CodeMirror editor
+            editor = CodeMirror.fromTextArea(jsonEditorTextarea, {
+                lineNumbers: true,
+                mode: { name: "javascript", json: true },
+                theme: "default",
+                gutters: ["CodeMirror-lint-markers"],
+                lint: true
+            });
+
+            const defaultScene = {
+                "Camera": [
+                    {
+                        "Data": {
+                            "LookFrom": {
+                                "X": 500000000,
+                                "Y": 500000000,
+                                "Z": 500000000
+                            },
+                            "LookAt": {
+                                "X": 0,
+                                "Y": 0,
+                                "Z": 0
+                            },
+                            "VUp": {
+                                "X": 0,
+                                "Y": 0,
+                                "Z": 1
+                            },
+                            "FOVHeight": 125000000,
+                            "FOVWidth": 125000000
+                        },
+                        "Type": "OrthographicCamera"
+                    },
+                    {
+                        "Data": {
+                            "LookFrom": {
+                                "X": 0,
+                                "Y": 0,
+                                "Z": 500000000
+                            },
+                            "LookAt": {
+                                "X": 0,
+                                "Y": 0,
+                                "Z": 0
+                            },
+                            "VUp": {
+                                "X": 1,
+                                "Y": 0,
+                                "Z": 0
+                            },
+                            "FOVHeight": 125000000,
+                            "FOVWidth": 125000000
+                        },
+                        "Type": "OrthographicCamera"
+                    }
+                ],
+                "Light": [
+                    {
+                        "Type": "PointLight",
+                        "Data": {
+                            "Position": {
+                                "X": 0,
+                                "Y": 90000000,
+                                "Z": 90000000
+                            },
+                            "Intensity": {
+                                "X": 1,
+                                "Y": 1,
+                                "Z": 0
+                            }
+                        }
+                    }
+                ],
+                "Entity": [
+                    {
+                        "Name": "Floor Plane",
+                        "Material": {
+                            "Type": "Lambertian",
+                            "Data": {
+                                "Albedo": { "X": 0.2, "Y": 0.8, "Z": 0.8 }
+                            }
+                        },
+                        "Shape": {
+                            "Type": "Plane",
+                            "Data": {
+                                "Center": { "X": -50000000, "Y": 0, "Z": 0 },
+                                "Normal": { "X": 0, "Y": 1, "Z": 0 },
+                                "Width": 50000000,
+                                "Height": 20000000
+                            }
+                        }
+                    },
+                    {
+                        "Name": "X-axis cylinder",
+                        "Material": {
+                            "Data": {
+                                "Color": {
+                                    "X": 1,
+                                    "Y": 0,
+                                    "Z": 0
+                                }
+                            },
+                            "Type": "Emitter"
+                        },
+                        "Shape": {
+                            "Data": {
+                                "Origin": {
+                                    "X": 0,
+                                    "Y": 0,
+                                    "Z": 0
+                                },
+                                "Direction": {
+                                    "X": 1,
+                                    "Y": 0,
+                                    "Z": 0
+                                },
+                                "Radius": 250000,
+                                "Height": 50000000
+                            },
+                            "Type": "Cylinder"
+                        }
+                    },
+                    {
+                        "Name": "Y-axis cylinder",
+                        "Material": {
+                            "Data": {
+                                "Color": {
+                                    "X": 0,
+                                    "Y": 1,
+                                    "Z": 0
+                                }
+                            },
+                            "Type": "Emitter"
+                        },
+                        "Shape": {
+                            "Data": {
+                                "Origin": {
+                                    "X": 0,
+                                    "Y": 0,
+                                    "Z": 0
+                                },
+                                "Direction": {
+                                    "X": 0,
+                                    "Y": 1,
+                                    "Z": 0
+                                },
+                                "Radius": 250000,
+                                "Height": 50000000
+                            },
+                            "Type": "Cylinder"
+                        }
+                    },
+                    {
+                        "Name": "Z-axis cylinder",
+                        "Material": {
+                            "Data": {
+                                "Color": {
+                                    "X": 0,
+                                    "Y": 0,
+                                    "Z": 1
+                                }
+                            },
+                            "Type": "Emitter"
+                        },
+                        "Shape": {
+                            "Data": {
+                                "Origin": {
+                                    "X": 0,
+                                    "Y": 0,
+                                    "Z": 0
+                                },
+                                "Direction": {
+                                    "X": 0,
+                                    "Y": 0,
+                                    "Z": 1
+                                },
+                                "Radius": 250000,
+                                "Height": 50000000
+                            },
+                            "Type": "Cylinder"
+                        }
+                    },
+                    {
+                        "Name": "Axis sphere",
+                        "Material": {
+                            "Data": {},
+                            "Type": "NormalShader"
+                        },
+                        "Shape": {
+                            "Data": {
+                                "Center": {
+                                    "X": 0,
+                                    "Y": 0,
+                                    "Z": 0
+                                },
+                                "Radius": 10000000
+                            },
+                            "Type": "Sphere"
+                        }
+                    },
+
+                    {
+                        "Name": "Light sphere",
+                        "Material": {
+                            "Data": {
+                                "Color": {
+                                    "X": 1,
+                                    "Y": 0,
+                                    "Z": 0
+                                }
+                            },
+                            "Type": "Emitter"
+                        },
+                        "Shape": {
+                            "Data": {
+                                "Center": {
+                                    "X": 50000000,
+                                    "Y": 0,
+                                    "Z": 0
+                                },
+                                "Radius": 10000000
+                            },
+                            "Type": "Sphere"
+                        }
+                    },
+                    {
+                        "Name": "Diffuse sphere",
+                        "Material": {
+                            "Data": {
+                                "Albedo": {
+                                    "X": 0.85,
+                                    "Y": 0.85,
+                                    "Z": 0.85
+                                }
+                            },
+                            "Type": "Lambertian"
+                        },
+                        "Shape": {
+                            "Data": {
+                                "Center": {
+                                    "X": 0,
+                                    "Y": 50000000,
+                                    "Z": 0
+                                },
+                                "Radius": 10000000
+                            },
+                            "Type": "Sphere"
+                        }
+                    }
+                ],
+                "RenderOptions": {
+                    "Seed": 0,
+                    "RaysPerPixel": 4,
+                    "MaxRayDepth": 10,
+                    "Dx": 256,
+                    "Dy": 256
+                }
+            };
+
+            // Set default scene in editor
+            editor.setValue(JSON.stringify(defaultScene, null, 2));
+
+            // Listen to changes in the editor
+            editor.on('change', () => {
+                debouncedUpdateRender();
+            });
+
+            // Initial render
+            updateRender();
+
+            // Periodic status check
+            async function checkStatus() {
+                try {
+                    const response = await fetch('/raytrace/status');
+                    if (response.ok) {
+                        statusIcon.style.backgroundColor = '#4CAF50'; // Green
+                    } else {
+                        statusIcon.style.backgroundColor = '#f44336'; // Red
+                        console.error('Status Error:', response.statusText);
+                    }
+                } catch (e) {
+                    statusIcon.style.backgroundColor = '#f44336'; // Red
+                    console.error('Connection Lost:', e);
+                }
+            }
+
+            // Initial status check
+            checkStatus();
+
+            // Check status periodically.
+            setInterval(checkStatus, 2000);
+
+            // Add event listener for spacebar to toggle animation
+            document.addEventListener('keydown', (e) => {
+                if (e.code === 'Space') {
+                    e.preventDefault(); // Prevent default spacebar behavior (like scrolling)
+                    toggleAnimation();
+                }
+            });
+
+            // Start animation by default
+            startAnimation();
+        });
+    </script>
+</body>
+
+</html>
